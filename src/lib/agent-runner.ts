@@ -1,6 +1,11 @@
 import { AGENT_TOOLS, executeAgentTool } from "./agent-tools";
 import { compileProject, normalizeProjectFiles } from "./compiler";
 import {
+  resolveModelProvider,
+  type ProviderToolResultInput,
+  type ProviderToolSpec,
+} from "./providers";
+import {
   getSupabaseServerClient,
   PROJECTS_TABLE,
   rowToProject,
@@ -18,35 +23,7 @@ import type {
 
 const JOB_STALE_MS = 5 * 60 * 1000; // 5 min heartbeat expiry for crashed serverless containers
 
-interface ChatCompletionMessage {
-  role: "system" | "user" | "assistant" | "tool";
-  content: string | null;
-  tool_calls?: Array<{
-    id: string;
-    type: "function";
-    function: {
-      name: string;
-      arguments: string;
-    };
-  }>;
-  tool_call_id?: string;
-}
-
-interface AccumulatedToolCall {
-  id: string;
-  name: string;
-  argumentsStr: string;
-}
-
-interface ResponsesToolDefinition {
-  type: "function";
-  name: string;
-  description: string;
-  parameters: Record<string, unknown>;
-}
-
-const RESPONSES_TOOLS: ResponsesToolDefinition[] = AGENT_TOOLS.map((t) => ({
-  type: "function",
+const PROVIDER_TOOL_SPECS: ProviderToolSpec[] = AGENT_TOOLS.map((t) => ({
   name: t.function.name,
   description: t.function.description,
   parameters: t.function.parameters,
@@ -70,7 +47,13 @@ export interface ActiveAgentJob {
 
 export interface RemoteJobState {
   project: Project;
-  agentStatus: "idle" | "running" | "stop_requested" | "done" | "error" | "aborted";
+  agentStatus:
+    | "idle"
+    | "running"
+    | "stop_requested"
+    | "done"
+    | "error"
+    | "aborted";
   agentJobId: string | null;
   agentUpdatedAt: number;
   isStale: boolean;
@@ -88,25 +71,6 @@ function getJobsMap(): Map<string, ActiveAgentJob> {
   return globalThis.__atomsAgentJobs;
 }
 
-function shouldUseResponsesApi(config: ModelConfig): boolean {
-  const lower = config.baseUrl.trim().toLowerCase();
-  if (lower.endsWith("/responses")) return true;
-  if (lower.endsWith("/chat/completions")) return false;
-  return config.provider === "openai" || lower.includes("api.openai.com");
-}
-
-function buildResponsesUrl(baseUrl: string): string {
-  const trimmed = baseUrl.trim().replace(/\/+$/, "");
-  if (trimmed.endsWith("/responses")) return trimmed;
-  return `${trimmed}/responses`;
-}
-
-function buildChatCompletionsUrl(baseUrl: string): string {
-  const trimmed = baseUrl.trim().replace(/\/+$/, "");
-  if (trimmed.endsWith("/chat/completions")) return trimmed;
-  return `${trimmed}/chat/completions`;
-}
-
 function buildWorkspaceContextMessage(files: ProjectFiles): string {
   const paths = Object.keys(files).sort();
   if (paths.length === 0) {
@@ -116,16 +80,6 @@ function buildWorkspaceContextMessage(files: ProjectFiles): string {
     .map((p) => `- ${p} (${files[p].split("\n").length} 行)`)
     .join("\n");
   return `当前虚拟工作区已有以下文件：\n${summary}\n\n如需修改现有逻辑，请先调用 read_file 查看相关文件内容再进行增量编辑或更新，最后调用 validate_project 校验。`;
-}
-
-async function parseUpstreamError(response: Response): Promise<string> {
-  const errText = await response.text().catch(() => "");
-  try {
-    const parsed = JSON.parse(errText);
-    return String(parsed?.error?.message || parsed?.message || errText);
-  } catch {
-    return errText;
-  }
 }
 
 async function persistInitialJobState(job: ActiveAgentJob): Promise<void> {
@@ -171,7 +125,6 @@ async function persistProgressToSupabase(
       agent_updated_at: nowIso,
       updated_at: nowIso,
     };
-    // Only set agent_status on terminal transitions so we never overwrite 'stop_requested' mid-run
     if (finalStatus) {
       payload.agent_status = finalStatus;
     }
@@ -234,9 +187,6 @@ function cloneProject(project: Project): Project {
   };
 }
 
-/**
- * Check remote Supabase state for cross-instance SSE streaming & dedupe
- */
 export async function fetchRemoteProjectJobState(
   projectId: string
 ): Promise<RemoteJobState | null> {
@@ -291,335 +241,6 @@ async function isStopRequestedInSupabase(
   }
 }
 
-/**
- * OpenAI Responses API (/v1/responses) streaming call
- */
-async function callResponsesApiStreaming(params: {
-  endpoint: string;
-  apiKey: string;
-  model: string;
-  instructions: string;
-  input: Array<Record<string, unknown>>;
-  previousResponseId?: string;
-  signal: AbortSignal;
-  onTextDelta: (delta: string) => void;
-}): Promise<{
-  responseId?: string;
-  content: string;
-  reasoning: string;
-  toolCalls: AccumulatedToolCall[];
-}> {
-  const payload: Record<string, unknown> = {
-    model: params.model,
-    instructions: params.instructions,
-    input: params.input,
-    tools: RESPONSES_TOOLS,
-    tool_choice: "auto",
-    stream: true,
-  };
-  if (params.previousResponseId) {
-    payload.previous_response_id = params.previousResponseId;
-  }
-
-  const response = await fetch(params.endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${params.apiKey}`,
-    },
-    body: JSON.stringify(payload),
-    signal: params.signal,
-  });
-
-  if (!response.ok) {
-    const detail = await parseUpstreamError(response);
-    throw new Error(
-      `模型接口返回错误 (HTTP ${response.status}): ${detail.slice(0, 400)}`
-    );
-  }
-
-  if (!response.body) {
-    throw new Error("模型接口未返回流式响应体。");
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder("utf-8");
-
-  let buffer = "";
-  let responseId: string | undefined;
-  let content = "";
-  let reasoning = "";
-  const toolCallsByItemId = new Map<string, AccumulatedToolCall>();
-  const toolCallOrder: string[] = [];
-  let completedOutputItems: Array<Record<string, unknown>> | null = null;
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-
-    for (const rawLine of lines) {
-      const line = rawLine.trim();
-      if (!line || !line.startsWith("data:")) continue;
-      const dataStr = line.slice(5).trim();
-      if (!dataStr || dataStr === "[DONE]") continue;
-
-      let evt: Record<string, unknown>;
-      try {
-        evt = JSON.parse(dataStr) as Record<string, unknown>;
-      } catch {
-        continue;
-      }
-
-      const evtType = String(evt.type || "");
-
-      if (evtType === "response.created" || evtType === "response.in_progress") {
-        const resp = evt.response as { id?: string } | undefined;
-        if (resp?.id) responseId = resp.id;
-      } else if (evtType === "response.output_text.delta") {
-        const delta = typeof evt.delta === "string" ? evt.delta : "";
-        if (delta) {
-          content += delta;
-          params.onTextDelta(delta);
-        }
-      } else if (evtType === "response.reasoning_summary_text.delta") {
-        const delta = typeof evt.delta === "string" ? evt.delta : "";
-        if (delta) {
-          reasoning += delta;
-          params.onTextDelta(delta);
-        }
-      } else if (evtType === "response.output_item.added") {
-        const item = evt.item as
-          | {
-              id?: string;
-              type?: string;
-              call_id?: string;
-              name?: string;
-              arguments?: string;
-            }
-          | undefined;
-        if (item?.type === "function_call") {
-          const itemKey =
-            item.id || item.call_id || `fc_${toolCallOrder.length}`;
-          if (!toolCallsByItemId.has(itemKey)) {
-            toolCallOrder.push(itemKey);
-            toolCallsByItemId.set(itemKey, {
-              id: item.call_id || itemKey,
-              name: item.name || "",
-              argumentsStr: item.arguments || "",
-            });
-          }
-        }
-      } else if (evtType === "response.function_call_arguments.delta") {
-        const itemKey = String(evt.item_id || "");
-        const delta = typeof evt.delta === "string" ? evt.delta : "";
-        if (itemKey && delta) {
-          const existing = toolCallsByItemId.get(itemKey);
-          if (existing) {
-            existing.argumentsStr += delta;
-          }
-        }
-      } else if (evtType === "response.output_item.done") {
-        const item = evt.item as
-          | {
-              id?: string;
-              type?: string;
-              call_id?: string;
-              name?: string;
-              arguments?: string;
-            }
-          | undefined;
-        if (item?.type === "function_call") {
-          const itemKey =
-            item.id || item.call_id || `fc_${toolCallOrder.length}`;
-          if (!toolCallsByItemId.has(itemKey)) {
-            toolCallOrder.push(itemKey);
-          }
-          toolCallsByItemId.set(itemKey, {
-            id: item.call_id || itemKey,
-            name: item.name || "",
-            argumentsStr: item.arguments || "",
-          });
-        }
-      } else if (evtType === "response.completed") {
-        const resp = evt.response as
-          | { id?: string; output?: Array<Record<string, unknown>> }
-          | undefined;
-        if (resp?.id) responseId = resp.id;
-        if (Array.isArray(resp?.output)) {
-          completedOutputItems = resp.output;
-        }
-      } else if (evtType === "response.failed" || evtType === "error") {
-        const errObj = (evt.error ||
-          (evt.response as { error?: { message?: string } } | undefined)
-            ?.error) as { message?: string } | undefined;
-        throw new Error(errObj?.message || "模型流式响应失败。");
-      }
-    }
-  }
-
-  let toolCalls: AccumulatedToolCall[] = toolCallOrder
-    .map((k) => toolCallsByItemId.get(k)!)
-    .filter((tc) => tc && tc.name.trim().length > 0);
-
-  if (completedOutputItems) {
-    const fromCompleted: AccumulatedToolCall[] = [];
-    for (const item of completedOutputItems) {
-      if (item.type === "function_call" && typeof item.name === "string") {
-        fromCompleted.push({
-          id: String(item.call_id || item.id || `call_${fromCompleted.length}`),
-          name: item.name,
-          argumentsStr:
-            typeof item.arguments === "string" ? item.arguments : "{}",
-        });
-      }
-    }
-    if (fromCompleted.length > 0) {
-      toolCalls = fromCompleted;
-    }
-  }
-
-  return { responseId, content, reasoning, toolCalls };
-}
-
-/**
- * Standard Chat Completions API (/v1/chat/completions) streaming call
- */
-async function callChatCompletionsStreaming(params: {
-  endpoint: string;
-  apiKey: string;
-  model: string;
-  messages: ChatCompletionMessage[];
-  signal: AbortSignal;
-  onTextDelta: (delta: string) => void;
-}): Promise<{
-  content: string;
-  reasoning: string;
-  toolCalls: AccumulatedToolCall[];
-}> {
-  const response = await fetch(params.endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${params.apiKey}`,
-    },
-    body: JSON.stringify({
-      model: params.model,
-      messages: params.messages,
-      tools: AGENT_TOOLS,
-      tool_choice: "auto",
-      stream: true,
-    }),
-    signal: params.signal,
-  });
-
-  if (!response.ok) {
-    const detail = await parseUpstreamError(response);
-    throw new Error(
-      `模型接口返回错误 (HTTP ${response.status}): ${detail.slice(0, 400)}`
-    );
-  }
-
-  if (!response.body) {
-    throw new Error("模型接口未返回流式响应体。");
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder("utf-8");
-
-  let buffer = "";
-  let content = "";
-  let reasoning = "";
-  const toolCallsMap = new Map<number, AccumulatedToolCall>();
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-
-    for (const rawLine of lines) {
-      const line = rawLine.trim();
-      if (!line || !line.startsWith("data:")) continue;
-      const payload = line.slice(5).trim();
-      if (payload === "[DONE]") continue;
-
-      let chunk: {
-        choices?: Array<{
-          delta?: {
-            content?: string | null;
-            reasoning_content?: string | null;
-            tool_calls?: Array<{
-              index?: number;
-              id?: string;
-              function?: {
-                name?: string;
-                arguments?: string;
-              };
-            }>;
-          };
-        }>;
-        error?: { message?: string };
-      };
-
-      try {
-        chunk = JSON.parse(payload);
-      } catch {
-        continue;
-      }
-
-      if (chunk.error?.message) {
-        throw new Error(`模型流式返回错误: ${chunk.error.message}`);
-      }
-
-      const delta = chunk.choices?.[0]?.delta;
-      if (!delta) continue;
-
-      if (
-        typeof delta.reasoning_content === "string" &&
-        delta.reasoning_content
-      ) {
-        reasoning += delta.reasoning_content;
-        params.onTextDelta(delta.reasoning_content);
-      }
-
-      if (typeof delta.content === "string" && delta.content) {
-        content += delta.content;
-        params.onTextDelta(delta.content);
-      }
-
-      if (Array.isArray(delta.tool_calls)) {
-        for (const tc of delta.tool_calls) {
-          const idx = typeof tc.index === "number" ? tc.index : 0;
-          const existing = toolCallsMap.get(idx) ?? {
-            id: tc.id || `call_${idx}_${Date.now()}`,
-            name: "",
-            argumentsStr: "",
-          };
-          if (tc.id) existing.id = tc.id;
-          if (tc.function?.name) existing.name += tc.function.name;
-          if (tc.function?.arguments) {
-            existing.argumentsStr += tc.function.arguments;
-          }
-          toolCallsMap.set(idx, existing);
-        }
-      }
-    }
-  }
-
-  const toolCalls = Array.from(toolCallsMap.entries())
-    .sort((a, b) => a[0] - b[0])
-    .map(([, v]) => v)
-    .filter((tc) => tc.name.trim().length > 0);
-
-  return { content, reasoning, toolCalls };
-}
-
 function patchAssistantMessage(
   job: ActiveAgentJob,
   patcher: (msg: ChatMessage) => ChatMessage
@@ -637,9 +258,6 @@ export function getAgentJob(projectId: string): ActiveAgentJob | undefined {
   return getJobsMap().get(projectId);
 }
 
-/**
- * Stop a running job both locally (same instance fast path) and in Supabase (cross-instance Serverless)
- */
 export async function requestStopAgentJob(projectId: string): Promise<boolean> {
   let stopped = false;
 
@@ -672,10 +290,6 @@ export async function requestStopAgentJob(projectId: string): Promise<boolean> {
   return stopped;
 }
 
-/**
- * Prepare a new background job, persist initial running state to Supabase,
- * and return an `execute()` function to be scheduled via Next.js `after()`.
- */
 export async function prepareBackgroundAgentJob(params: {
   project: Project;
   prompt: string;
@@ -696,7 +310,6 @@ export async function prepareBackgroundAgentJob(params: {
     };
   }
 
-  // Check Supabase in case another Serverless container is already running a job for this project
   const remoteState = await fetchRemoteProjectJobState(params.project.id);
   if (
     remoteState &&
@@ -774,7 +387,6 @@ export async function prepareBackgroundAgentJob(params: {
 
   jobs.set(baseProject.id, job);
 
-  // Persist initial 'running' state BEFORE returning HTTP 200 so cross-instance streams see it immediately
   await persistInitialJobState(job);
 
   return {
@@ -795,16 +407,21 @@ async function runJobLoop(
     Math.max(Number(config.maxIterations) || 12, 2),
     24
   );
-  const useResponses = shouldUseResponsesApi(config);
-  const endpoint = useResponses
-    ? buildResponsesUrl(config.baseUrl)
-    : buildChatCompletionsUrl(config.baseUrl);
 
   const initialFiles: ProjectFiles = { ...job.projectState.files };
   const workingFiles: ProjectFiles = { ...job.projectState.files };
   const changedFilesSet = new Set<string>();
 
-  // Throttled Supabase flush for streaming thought deltas (keeps cross-instance SSE smooth!)
+  const provider = resolveModelProvider(config);
+  const session = provider.createSession({
+    config,
+    systemPrompt: REACT_AGENT_SYSTEM_PROMPT,
+    workspaceContext: buildWorkspaceContextMessage(workingFiles),
+    history: recentHistory,
+    userPrompt: job.prompt,
+    tools: PROVIDER_TOOL_SPECS,
+  });
+
   let deltaFlushTimer: ReturnType<typeof setTimeout> | null = null;
   const scheduleDeltaPersist = () => {
     if (deltaFlushTimer) return;
@@ -816,7 +433,6 @@ async function runJobLoop(
     }, 750);
   };
 
-  // Cross-instance stop polling (so POST /api/agent/stop hitting another Vercel container still aborts this job)
   const stopPollTimer = setInterval(() => {
     if (signal.aborted || job.status !== "running") return;
     void isStopRequestedInSupabase(job.projectId, job.jobId).then((stopReq) => {
@@ -827,27 +443,6 @@ async function runJobLoop(
   }, 1200);
 
   try {
-    const workspaceContext = buildWorkspaceContextMessage(workingFiles);
-    const combinedInstructions = `${REACT_AGENT_SYSTEM_PROMPT}\n\n${workspaceContext}`;
-    let previousResponseId: string | undefined;
-    let nextResponsesInput: Array<Record<string, unknown>> = [
-      ...recentHistory.map((h) => ({
-        role: h.role,
-        content: h.content,
-      })),
-      { role: "user", content: job.prompt },
-    ];
-
-    const chatMessages: ChatCompletionMessage[] = [
-      { role: "system", content: REACT_AGENT_SYSTEM_PROMPT },
-      { role: "system", content: workspaceContext },
-      ...recentHistory.map((h) => ({
-        role: h.role,
-        content: h.content,
-      })),
-      { role: "user", content: job.prompt },
-    ];
-
     let finalSummary = "";
     let lastValidationPassed = false;
     let hasMutatedSinceValidation = false;
@@ -889,38 +484,10 @@ async function runJobLoop(
         scheduleDeltaPersist();
       };
 
-      let content = "";
-      let reasoning = "";
-      let toolCalls: AccumulatedToolCall[] = [];
-
-      if (useResponses) {
-        const res = await callResponsesApiStreaming({
-          endpoint,
-          apiKey: config.apiKey.trim(),
-          model: config.model.trim(),
-          instructions: combinedInstructions,
-          input: nextResponsesInput,
-          previousResponseId,
-          signal,
-          onTextDelta,
-        });
-        if (res.responseId) previousResponseId = res.responseId;
-        content = res.content;
-        reasoning = res.reasoning;
-        toolCalls = res.toolCalls;
-      } else {
-        const res = await callChatCompletionsStreaming({
-          endpoint,
-          apiKey: config.apiKey.trim(),
-          model: config.model.trim(),
-          messages: chatMessages,
-          signal,
-          onTextDelta,
-        });
-        content = res.content;
-        reasoning = res.reasoning;
-        toolCalls = res.toolCalls;
-      }
+      const { content, reasoning, toolCalls } = await session.runTurn({
+        signal,
+        onTextDelta,
+      });
 
       const combinedThought = [reasoning, content]
         .filter(Boolean)
@@ -958,22 +525,7 @@ async function runJobLoop(
           });
         }
 
-        if (!useResponses) {
-          chatMessages.push({
-            role: "assistant",
-            content: content || null,
-            tool_calls: toolCalls.map((tc) => ({
-              id: tc.id,
-              type: "function",
-              function: {
-                name: tc.name,
-                arguments: tc.argumentsStr || "{}",
-              },
-            })),
-          });
-        }
-
-        const responsesToolOutputs: Array<Record<string, unknown>> = [];
+        const toolResults: ProviderToolResultInput[] = [];
         let mutatedThisTurn = false;
 
         for (const tc of toolCalls) {
@@ -1086,24 +638,15 @@ async function runJobLoop(
             durationMs,
           });
 
-          if (useResponses) {
-            responsesToolOutputs.push({
-              type: "function_call_output",
-              call_id: tc.id,
-              output: resultText,
-            });
-          } else {
-            chatMessages.push({
-              role: "tool",
-              tool_call_id: tc.id,
-              content: resultText,
-            });
-          }
+          toolResults.push({
+            callId: tc.id,
+            toolName: tc.name,
+            output: resultText,
+            ok,
+          });
         }
 
-        if (useResponses) {
-          nextResponsesInput = responsesToolOutputs;
-        }
+        session.appendToolResults(toolResults);
 
         if (mutatedThisTurn) {
           const changed = Array.from(changedFilesSet);
@@ -1178,19 +721,9 @@ async function runJobLoop(
           });
           void queuePersist(job);
 
-          const fixInstruction = `系统自动校验未通过，发现以下错误，请立即修复并调用 validate_project 确认通过：\n${autoErrSummary}`;
-          if (useResponses) {
-            nextResponsesInput = [{ role: "user", content: fixInstruction }];
-          } else {
-            chatMessages.push({
-              role: "assistant",
-              content: content || "已完成代码编写。",
-            });
-            chatMessages.push({
-              role: "user",
-              content: fixInstruction,
-            });
-          }
+          session.appendUserFollowUp(
+            `系统自动校验未通过，发现以下错误，请立即修复并调用 validate_project 确认通过：\n${autoErrSummary}`
+          );
           continue;
         }
       }

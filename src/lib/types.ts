@@ -1,6 +1,7 @@
 export type ModelProviderId =
   | "openai"
   | "gemini"
+  | "anthropic"
   | "deepseek"
   | "openrouter"
   | "custom";
@@ -175,7 +176,7 @@ export const MODEL_PRESETS: ModelPreset[] = [
   {
     id: "gemini",
     name: "Google Gemini",
-    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta",
     defaultModel: "gemini-4-hydrogen",
     suggestedModels: [
       "gemini-4-hydrogen",
@@ -184,7 +185,21 @@ export const MODEL_PRESETS: ModelPreset[] = [
       "gemini-3.8-flash",
     ],
     keyPlaceholder: "AIza...",
-    docsHint: "使用 Google AI Studio 兼容端点（Gemini 4 / 3.8 系列）",
+    docsHint: "使用 Google Gemini 官方原生接口（Gemini 4 / 3.8 系列）",
+  },
+  {
+    id: "anthropic",
+    name: "Anthropic",
+    baseUrl: "https://api.anthropic.com/v1",
+    defaultModel: "claude-sonnet-5-5",
+    suggestedModels: [
+      "claude-sonnet-5-5",
+      "claude-opus-5-5",
+      "claude-fable-5-2",
+      "claude-haiku-5-5",
+    ],
+    keyPlaceholder: "sk-ant-...",
+    docsHint: "使用 Anthropic 官方原生接口（Claude 5 系列）",
   },
   {
     id: "deepseek",

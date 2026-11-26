@@ -149,7 +149,7 @@ export function SettingsModal({
             <label className="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-2">
               服务商预设
             </label>
-            <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
+            <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
               {MODEL_PRESETS.map((preset) => {
                 const active = draft.provider === preset.id;
                 return (
