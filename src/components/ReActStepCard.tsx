@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Brain,
   CheckCircle2,
@@ -75,8 +75,19 @@ export function ReActStepCard({
   isStreaming,
   onSelectFile,
 }: ReActStepCardProps) {
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(Boolean(isStreaming));
   const [openResults, setOpenResults] = useState<Record<string, boolean>>({});
+  const prevStreamingRef = useRef(Boolean(isStreaming));
+
+  useEffect(() => {
+    const runningNow = Boolean(isStreaming);
+    if (prevStreamingRef.current && !runningNow) {
+      setExpanded(false);
+    } else if (!prevStreamingRef.current && runningNow) {
+      setExpanded(true);
+    }
+    prevStreamingRef.current = runningNow;
+  }, [isStreaming]);
 
   if (!steps || steps.length === 0) return null;
 

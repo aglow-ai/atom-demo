@@ -7,7 +7,6 @@ import {
   ArrowRight,
   FolderKanban,
   Loader2,
-  Sparkles,
 } from "lucide-react";
 import {
   createProject,
@@ -147,16 +146,11 @@ export function HomePage() {
         />
 
         <div className="relative w-full max-w-2xl mx-auto text-center">
-          <div className="inline-flex items-center gap-1.5 rounded-full border border-violet-500/25 bg-violet-500/10 px-3 py-1 text-xs font-medium text-violet-600 dark:text-violet-300 mb-6">
-            <Sparkles className="h-3.5 w-3.5" />
-            <span>AI 智能体驱动 · 实时交互式应用生成</span>
-          </div>
-
           <h1 className="text-3xl sm:text-5xl font-bold tracking-tight text-zinc-900 dark:text-zinc-50 leading-tight">
-            用一句话，构建可运行的网页应用
+            今天想做什么应用？
           </h1>
-          <p className="mt-4 text-sm sm:text-base text-zinc-500 dark:text-zinc-400 max-w-xl mx-auto leading-relaxed">
-            输入你的想法，智能体将自动规划、生成并实时呈现可交互的网页应用，随时通过对话持续优化。
+          <p className="mt-3 text-sm sm:text-base text-zinc-500 dark:text-zinc-400">
+            说出想法，即刻生成可交互网页
           </p>
 
           {/* Centered Prompt Box */}
