@@ -8,6 +8,7 @@ import {
   FileCode2,
   History,
   Loader2,
+  RotateCcw,
   Settings,
   Sparkles,
   Square,
@@ -162,6 +163,20 @@ export function ChatPanel({
           </div>
         ) : (
           messages.map((msg) => {
+            if (msg.role === "system") {
+              return (
+                <div
+                  key={msg.id}
+                  className="flex items-center justify-center py-1"
+                >
+                  <div className="inline-flex items-center gap-1.5 rounded-full border border-zinc-200 dark:border-zinc-800 bg-zinc-100/80 dark:bg-zinc-900/80 px-3 py-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+                    <RotateCcw className="h-3 w-3 text-violet-500 shrink-0" />
+                    <span>{msg.content}</span>
+                  </div>
+                </div>
+              );
+            }
+
             if (msg.role === "user") {
               return (
                 <div key={msg.id} className="flex items-start gap-2.5 justify-end">
@@ -231,9 +246,10 @@ export function ChatPanel({
                       {msg.snapshotId && (
                         <button
                           type="button"
+                          disabled={isRunning}
                           onClick={() => onRestoreSnapshot(msg.snapshotId!)}
-                          className="inline-flex items-center gap-1 rounded-md border border-zinc-200 dark:border-zinc-800 px-2 py-0.5 text-[11px] text-zinc-500 dark:text-zinc-400 hover:border-zinc-400 dark:hover:border-zinc-600 hover:text-zinc-800 dark:hover:text-zinc-200 transition-colors"
-                          title="回退代码到此版本快照"
+                          className="inline-flex items-center gap-1 rounded-md border border-zinc-200 dark:border-zinc-800 px-2 py-0.5 text-[11px] text-zinc-500 dark:text-zinc-400 hover:border-violet-500/50 hover:text-violet-600 dark:hover:text-violet-300 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                          title="将应用代码回滚到此版本"
                         >
                           <History className="h-3 w-3" />
                           恢复此版本

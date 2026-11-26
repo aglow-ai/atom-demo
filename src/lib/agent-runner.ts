@@ -582,7 +582,15 @@ export function startBackgroundAgentJob(params: {
   const historySnapshot = baseProject.messages
     .filter((m) => m.content.trim().length > 0)
     .slice(-10)
-    .map((m) => ({ role: m.role, content: m.content.slice(0, 4000) }));
+    .map((m) => ({
+      role: (m.role === "assistant" ? "assistant" : "user") as
+        | "user"
+        | "assistant",
+      content:
+        m.role === "system"
+          ? `[系统状态通知] ${m.content.slice(0, 500)}（请以当前工作区最新文件内容为准）`
+          : m.content.slice(0, 4000),
+    }));
 
   baseProject.name = shouldAutoName
     ? prompt.replace(/\s+/g, " ").slice(0, 18)

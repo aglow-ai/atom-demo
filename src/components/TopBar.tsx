@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Atom,
+  Check,
   Download,
   FileArchive,
   FileCode,
@@ -19,10 +20,11 @@ import type { ModelConfig, Project } from "@/lib/types";
 
 interface TopBarProps {
   activeProject: Project;
+  viewingSnapshotId: string | null;
   modelConfig: ModelConfig;
   theme: "dark" | "light";
   onRenameProject: (name: string) => void;
-  onRestoreSnapshot: (snapshotId: string) => void;
+  onSelectSnapshot: (snapshotId: string | null) => void;
   onExportHtml: () => void;
   onExportZip: () => void;
   onToggleTheme: () => void;
@@ -31,10 +33,11 @@ interface TopBarProps {
 
 export function TopBar({
   activeProject,
+  viewingSnapshotId,
   modelConfig,
   theme,
   onRenameProject,
-  onRestoreSnapshot,
+  onSelectSnapshot,
   onExportHtml,
   onExportZip,
   onToggleTheme,
@@ -148,51 +151,92 @@ export function TopBar({
 
       {/* Right: Snapshots, Export, Theme, Settings */}
       <div className="flex items-center gap-2">
-        {activeProject.snapshots.length > 0 && (
-          <div className="relative">
-            <button
-              type="button"
-              onClick={() =>
-                setOpenMenu((m) => (m === "snapshots" ? null : "snapshots"))
-              }
-              className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 dark:border-zinc-800 px-2.5 py-1.5 text-xs text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
-            >
-              <History className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">
-                版本 ({activeProject.snapshots.length})
-              </span>
-            </button>
+        {activeProject.snapshots.length > 0 && (() => {
+          const total = activeProject.snapshots.length;
+          const latestSnap = activeProject.snapshots[total - 1];
+          const activeIdx = viewingSnapshotId
+            ? activeProject.snapshots.findIndex((s) => s.id === viewingSnapshotId)
+            : total - 1;
+          const isViewingOlder =
+            viewingSnapshotId !== null &&
+            activeIdx !== -1 &&
+            activeIdx < total - 1;
 
-            {openMenu === "snapshots" && (
-              <div className="absolute right-0 mt-1.5 w-64 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#141418] shadow-xl p-1.5 z-40">
-                <div className="px-2 py-1 text-[11px] font-medium text-zinc-400">
-                  点击恢复历史版本
+          return (
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() =>
+                  setOpenMenu((m) => (m === "snapshots" ? null : "snapshots"))
+                }
+                className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
+                  isViewingOlder
+                    ? "border-violet-500/50 bg-violet-500/10 text-violet-600 dark:text-violet-300 font-medium"
+                    : "border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                }`}
+              >
+                <History className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">
+                  {isViewingOlder
+                    ? `查看 v${activeIdx + 1}`
+                    : `版本 (${total})`}
+                </span>
+              </button>
+
+              {openMenu === "snapshots" && (
+                <div className="absolute right-0 mt-1.5 w-68 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#141418] shadow-xl p-1.5 z-40">
+                  <div className="px-2 py-1 text-[11px] font-medium text-zinc-400">
+                    查看历史版本（只读）
+                  </div>
+                  <div className="max-h-64 overflow-y-auto space-y-0.5 mt-1">
+                    {[...activeProject.snapshots].reverse().map((snap, revIdx) => {
+                      const versionNum = total - revIdx;
+                      const isLatest = snap.id === latestSnap.id;
+                      const isSelected = viewingSnapshotId
+                        ? snap.id === viewingSnapshotId
+                        : isLatest;
+                      return (
+                        <button
+                          key={snap.id}
+                          type="button"
+                          onClick={() => {
+                            onSelectSnapshot(isLatest ? null : snap.id);
+                            setOpenMenu(null);
+                          }}
+                          className={`w-full text-left rounded-lg px-2.5 py-2 text-xs transition-colors flex items-start justify-between gap-2 ${
+                            isSelected
+                              ? "bg-violet-500/12 text-violet-700 dark:text-violet-300"
+                              : "hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-800 dark:text-zinc-200"
+                          }`}
+                        >
+                          <div className="min-w-0">
+                            <div className="font-medium truncate flex items-center gap-1.5">
+                              <span>
+                                v{versionNum} · {snap.label}
+                              </span>
+                              {isLatest && (
+                                <span className="rounded bg-emerald-500/15 px-1.5 py-0.2 text-[10px] font-medium text-emerald-600 dark:text-emerald-400 shrink-0">
+                                  最新
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[10px] text-zinc-400 mt-0.5">
+                              {new Date(snap.createdAt).toLocaleTimeString()} ·{" "}
+                              {Object.keys(snap.files).length} 个文件
+                            </div>
+                          </div>
+                          {isSelected && (
+                            <Check className="h-3.5 w-3.5 text-violet-500 shrink-0 mt-0.5" />
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
-                <div className="max-h-60 overflow-y-auto space-y-0.5 mt-1">
-                  {[...activeProject.snapshots].reverse().map((snap, idx) => (
-                    <button
-                      key={snap.id}
-                      type="button"
-                      onClick={() => {
-                        onRestoreSnapshot(snap.id);
-                        setOpenMenu(null);
-                      }}
-                      className="w-full text-left rounded-lg px-2.5 py-2 text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
-                    >
-                      <div className="font-medium text-zinc-800 dark:text-zinc-200 truncate">
-                        v{activeProject.snapshots.length - idx} · {snap.label}
-                      </div>
-                      <div className="text-[10px] text-zinc-400 mt-0.5">
-                        {new Date(snap.createdAt).toLocaleTimeString()} ·{" "}
-                        {Object.keys(snap.files).length} 个文件
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
+              )}
+            </div>
+          );
+        })()}
 
         <div className="relative">
           <button

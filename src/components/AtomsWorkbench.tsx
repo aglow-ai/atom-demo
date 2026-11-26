@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, Code2, Eye, Loader2 } from "lucide-react";
+import { ArrowLeft, Code2, Eye, History, Loader2 } from "lucide-react";
 import { exportProjectZip, exportStandaloneHtml } from "@/lib/export";
 import {
   consumePendingPrompt,
@@ -52,6 +52,9 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
   const [modelConfig, setModelConfig] =
     useState<ModelConfig>(DEFAULT_MODEL_CONFIG);
   const [project, setProject] = useState<Project | null>(null);
+  const [viewingSnapshotId, setViewingSnapshotId] = useState<string | null>(
+    null
+  );
 
   const [rightTab, setRightTab] = useState<"preview" | "code">("preview");
   const [activeFile, setActiveFile] = useState<string | null>(null);
@@ -83,16 +86,6 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
       setToast((prev) => (prev === msg ? null : prev));
     }, 2600);
   }, []);
-
-  const persistProject = useCallback(
-    async (target: Project) => {
-      const res = await saveProject(target);
-      if (!res.ok) {
-        showToast("保存失败，请稍后重试");
-      }
-    },
-    [showToast]
-  );
 
   /**
    * Subscribe (or reconnect after refresh) to the server-side background job stream.
@@ -427,19 +420,58 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
     setRightTab("code");
   };
 
+  const handleSelectSnapshot = (snapshotId: string | null) => {
+    const cur = projectRef.current;
+    if (!cur) return;
+    if (!snapshotId) {
+      setViewingSnapshotId(null);
+      return;
+    }
+    const total = cur.snapshots.length;
+    const latest = cur.snapshots[total - 1];
+    if (latest && latest.id === snapshotId) {
+      setViewingSnapshotId(null);
+      return;
+    }
+    const idx = cur.snapshots.findIndex((s) => s.id === snapshotId);
+    if (idx === -1) return;
+    setViewingSnapshotId(snapshotId);
+    setActiveFile(null);
+  };
+
   const handleRestoreSnapshot = async (snapshotId: string) => {
     const cur = projectRef.current;
     if (!cur || isRunning) return;
-    const snap = cur.snapshots.find((s) => s.id === snapshotId);
-    if (!snap) return;
+    const idx = cur.snapshots.findIndex((s) => s.id === snapshotId);
+    if (idx === -1) return;
+    const snap = cur.snapshots[idx];
+    const now = Date.now();
+    const versionNum = idx + 1;
+
+    const noticeMsg: ChatMessage = {
+      id: `msg_sys_${now}`,
+      role: "system",
+      content: `已回滚至 v${versionNum} · ${snap.label}`,
+      createdAt: now,
+    };
+
     const updated: Project = {
       ...cur,
       files: { ...snap.files },
-      updatedAt: Date.now(),
+      messages: [...cur.messages, noticeMsg],
+      updatedAt: now,
     };
+
+    setViewingSnapshotId(null);
+    setActiveFile(null);
     setProjectAndRef(updated);
-    showToast(`已恢复快照：${snap.label}`);
-    await persistProject(updated);
+    mirrorProjectLocally(updated);
+    showToast(`已回滚至 v${versionNum} · ${snap.label}`);
+
+    const res = await saveProject(updated);
+    if (!res.ok) {
+      showToast("保存回滚结果失败，请稍后重试");
+    }
   };
 
   const handleStop = async () => {
@@ -499,6 +531,7 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
             }
           : p
       );
+      setViewingSnapshotId(null);
       setIsRunning(true);
 
       try {
@@ -608,22 +641,29 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
       modelConfig.baseUrl.trim() &&
       modelConfig.model.trim()
   );
-  const fileCount = Object.keys(project.files).length;
+  const viewingSnapIndex = viewingSnapshotId
+    ? project.snapshots.findIndex((s) => s.id === viewingSnapshotId)
+    : -1;
+  const viewingSnapshot =
+    viewingSnapIndex !== -1 ? project.snapshots[viewingSnapIndex] : null;
+  const displayedFiles = viewingSnapshot ? viewingSnapshot.files : project.files;
+  const fileCount = Object.keys(displayedFiles).length;
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-zinc-50 dark:bg-[#09090b] text-zinc-900 dark:text-zinc-100">
       <TopBar
         activeProject={project}
+        viewingSnapshotId={viewingSnapshot ? viewingSnapshot.id : null}
         modelConfig={modelConfig}
         theme={theme}
         onRenameProject={handleRenameProject}
-        onRestoreSnapshot={handleRestoreSnapshot}
+        onSelectSnapshot={handleSelectSnapshot}
         onExportHtml={() => {
-          exportStandaloneHtml(project.name, project.files);
+          exportStandaloneHtml(project.name, displayedFiles);
           showToast("已导出单页应用 (HTML)");
         }}
         onExportZip={async () => {
-          await exportProjectZip(project.name, project.files);
+          await exportProjectZip(project.name, displayedFiles);
           showToast("已导出源码包 (ZIP)");
         }}
         onToggleTheme={handleToggleTheme}
@@ -669,6 +709,27 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
 
         {/* Right: Preview & Read-only Code Tabs */}
         <div className="flex-1 flex flex-col min-w-0 min-h-0">
+          {viewingSnapshot && (
+            <div className="flex items-center justify-between gap-2 px-3.5 py-2 border-b border-violet-500/25 bg-violet-500/10 text-xs text-violet-700 dark:text-violet-300">
+              <div className="flex items-center gap-2 min-w-0">
+                <History className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">
+                  正在查看历史版本{" "}
+                  <strong>
+                    v{viewingSnapIndex + 1} · {viewingSnapshot.label}
+                  </strong>
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setViewingSnapshotId(null)}
+                className="rounded-md bg-violet-600 hover:bg-violet-500 px-2.5 py-1 text-[11px] font-medium text-white shrink-0 transition-colors"
+              >
+                返回最新版本
+              </button>
+            </div>
+          )}
+
           <div className="flex items-center justify-between px-3 py-1.5 border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-[#0e0e11]">
             <div className="inline-flex items-center rounded-lg border border-zinc-200 dark:border-zinc-800 p-0.5 bg-white dark:bg-zinc-900">
               <button
@@ -720,13 +781,13 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
             {rightTab === "preview" ? (
               <PreviewPane
                 projectName={project.name}
-                files={project.files}
-                isRunning={isRunning}
+                files={displayedFiles}
+                isRunning={isRunning || Boolean(viewingSnapshot)}
                 onAutoFix={handleAutoFix}
               />
             ) : (
               <CodePane
-                files={project.files}
+                files={displayedFiles}
                 activeFile={activeFile}
                 onSelectFile={setActiveFile}
               />
