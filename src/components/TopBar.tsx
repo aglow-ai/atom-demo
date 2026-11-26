@@ -4,14 +4,12 @@ import React, { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Atom,
-  Check,
   Download,
   FileArchive,
   FileCode,
   FolderKanban,
   History,
   Home,
-  Loader2,
   Moon,
   Pencil,
   Settings,
@@ -23,7 +21,6 @@ interface TopBarProps {
   activeProject: Project;
   modelConfig: ModelConfig;
   theme: "dark" | "light";
-  syncState: "saved" | "saving" | "error";
   onRenameProject: (name: string) => void;
   onRestoreSnapshot: (snapshotId: string) => void;
   onExportHtml: () => void;
@@ -36,7 +33,6 @@ export function TopBar({
   activeProject,
   modelConfig,
   theme,
-  syncState,
   onRenameProject,
   onRestoreSnapshot,
   onExportHtml,
@@ -148,30 +144,6 @@ export function TopBar({
             <Pencil className="h-3 w-3 text-zinc-400 opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
           </button>
         )}
-
-        {/* Save Status */}
-        <span
-          className={`hidden md:inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${
-            syncState === "saved"
-              ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-              : syncState === "saving"
-              ? "bg-violet-500/10 text-violet-600 dark:text-violet-400"
-              : "bg-rose-500/10 text-rose-600 dark:text-rose-400"
-          }`}
-        >
-          {syncState === "saving" ? (
-            <Loader2 className="h-2.5 w-2.5 animate-spin" />
-          ) : syncState === "saved" ? (
-            <Check className="h-2.5 w-2.5" />
-          ) : null}
-          <span>
-            {syncState === "saved"
-              ? "已保存"
-              : syncState === "saving"
-              ? "保存中…"
-              : "保存失败"}
-          </span>
-        </span>
       </div>
 
       {/* Right: Snapshots, Export, Theme, Settings */}

@@ -52,9 +52,6 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
   const [modelConfig, setModelConfig] =
     useState<ModelConfig>(DEFAULT_MODEL_CONFIG);
   const [project, setProject] = useState<Project | null>(null);
-  const [syncState, setSyncState] = useState<"saved" | "saving" | "error">(
-    "saved"
-  );
 
   const [rightTab, setRightTab] = useState<"preview" | "code">("preview");
   const [activeFile, setActiveFile] = useState<string | null>(null);
@@ -89,12 +86,8 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
 
   const persistProject = useCallback(
     async (target: Project) => {
-      setSyncState("saving");
       const res = await saveProject(target);
-      if (res.ok) {
-        setSyncState("saved");
-      } else {
-        setSyncState("error");
+      if (!res.ok) {
         showToast("保存失败，请稍后重试");
       }
     },
@@ -163,9 +156,6 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
               setProjectAndRef(event.project);
               mirrorProjectLocally(event.project);
               setIsRunning(event.status === "running");
-              if (event.status === "done") {
-                setSyncState("saved");
-              }
               break;
             }
 
@@ -290,7 +280,6 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
                 mirrorProjectLocally(event.project);
               }
               setIsRunning(false);
-              setSyncState("saved");
               if (
                 event.changedFiles.length > 0 &&
                 Object.keys(event.files).length > 0
@@ -370,7 +359,6 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
           setProjectAndRef(null);
         } else {
           setProjectAndRef(loaded.project);
-          setSyncState("saved");
           // Automatically reconnect if a background job is currently running (or just finished)
           void attachToJobStream(projectId);
         }
@@ -428,9 +416,10 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
     if (!cur) return;
     const updated: Project = { ...cur, name, updatedAt: Date.now() };
     setProjectAndRef(updated);
-    setSyncState("saving");
     const res = await renameProjectById(cur.id, name);
-    setSyncState(res.ok ? "saved" : "error");
+    if (!res.ok) {
+      showToast("重命名失败，请稍后重试");
+    }
   };
 
   const handleSelectFileFromChat = (path: string) => {
@@ -511,7 +500,6 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
           : p
       );
       setIsRunning(true);
-      setSyncState("saving");
 
       try {
         const res = await fetch("/api/agent/run", {
@@ -540,7 +528,6 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
               : p
           );
           setIsRunning(false);
-          setSyncState("error");
           showToast(errMsg);
           return;
         }
@@ -566,7 +553,6 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
             : p
         );
         setIsRunning(false);
-        setSyncState("error");
         showToast(errMsg);
       }
     },
@@ -630,7 +616,6 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
         activeProject={project}
         modelConfig={modelConfig}
         theme={theme}
-        syncState={syncState}
         onRenameProject={handleRenameProject}
         onRestoreSnapshot={handleRestoreSnapshot}
         onExportHtml={() => {
