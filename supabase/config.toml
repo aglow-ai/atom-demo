@@ -1,0 +1,5 @@
+project_id = "uacnvxscbhzlxctamwfm"
+
+[db.migrations]
+enabled = true
+schema_paths = []
