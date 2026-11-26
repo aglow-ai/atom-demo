@@ -71,6 +71,7 @@ export function SettingsModal({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          provider: draft.provider,
           baseUrl: draft.baseUrl,
           apiKey: draft.apiKey,
           model: draft.model,
@@ -238,7 +239,7 @@ export function SettingsModal({
               onChange={(e) =>
                 setDraft((p) => ({ ...p, model: e.target.value }))
               }
-              placeholder="例如 gpt-4.1 / gemini-2.5-flash / deepseek-chat"
+              placeholder="例如 gpt-6.2-sol / gemini-4-hydrogen / deepseek-v4-pro"
               className="w-full rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/70 px-3 py-2 text-sm font-mono focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/20"
             />
             {activePreset.suggestedModels.length > 0 && (
@@ -261,8 +262,8 @@ export function SettingsModal({
             )}
           </div>
 
-          {/* Advanced Sliders */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
+          {/* Max Iterations Slider */}
+          <div className="pt-1">
             <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 p-3 bg-zinc-50/60 dark:bg-zinc-900/40">
               <div className="flex items-center justify-between text-xs mb-1.5">
                 <span className="font-medium text-zinc-700 dark:text-zinc-300">
@@ -282,31 +283,6 @@ export function SettingsModal({
                   setDraft((p) => ({
                     ...p,
                     maxIterations: Number(e.target.value),
-                  }))
-                }
-                className="w-full accent-violet-500"
-              />
-            </div>
-
-            <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 p-3 bg-zinc-50/60 dark:bg-zinc-900/40">
-              <div className="flex items-center justify-between text-xs mb-1.5">
-                <span className="font-medium text-zinc-700 dark:text-zinc-300">
-                  采样温度 (Temperature)
-                </span>
-                <span className="font-mono text-violet-600 dark:text-violet-400">
-                  {draft.temperature.toFixed(1)}
-                </span>
-              </div>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.1}
-                value={draft.temperature}
-                onChange={(e) =>
-                  setDraft((p) => ({
-                    ...p,
-                    temperature: Number(e.target.value),
                   }))
                 }
                 className="w-full accent-violet-500"

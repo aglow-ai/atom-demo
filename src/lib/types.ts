@@ -21,7 +21,6 @@ export interface ModelConfig {
   apiKey: string;
   model: string;
   maxIterations: number;
-  temperature: number;
 }
 
 export type ProjectFiles = Record<string, string>;
@@ -154,51 +153,59 @@ export const MODEL_PRESETS: ModelPreset[] = [
     id: "openai",
     name: "OpenAI",
     baseUrl: "https://api.openai.com/v1",
-    defaultModel: "gpt-4.1",
-    suggestedModels: ["gpt-4.1", "gpt-4.1-mini", "gpt-4o", "gpt-4o-mini"],
+    defaultModel: "gpt-6.2-sol",
+    suggestedModels: [
+      "gpt-6.2-astra",
+      "gpt-6.2-sol",
+      "gpt-6.1-terra",
+      "gpt-6-luna",
+    ],
     keyPlaceholder: "sk-...",
-    docsHint: "支持 OpenAI 官方 API Key",
+    docsHint: "支持 OpenAI 官方 API Key（GPT-6 系列）",
   },
   {
     id: "gemini",
     name: "Google Gemini",
     baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
-    defaultModel: "gemini-2.5-flash",
+    defaultModel: "gemini-4-hydrogen",
     suggestedModels: [
-      "gemini-2.5-flash",
-      "gemini-2.5-pro",
-      "gemini-2.0-flash",
+      "gemini-4-hydrogen",
+      "gemini-4-argon",
+      "gemini-4-neon",
+      "gemini-3.8-flash",
     ],
     keyPlaceholder: "AIza...",
-    docsHint: "使用 Google AI Studio OpenAI 兼容端点",
+    docsHint: "使用 Google AI Studio 兼容端点（Gemini 4 / 3.8 系列）",
   },
   {
     id: "deepseek",
     name: "DeepSeek",
     baseUrl: "https://api.deepseek.com/v1",
-    defaultModel: "deepseek-chat",
-    suggestedModels: ["deepseek-chat", "deepseek-reasoner"],
+    defaultModel: "deepseek-v4-pro",
+    suggestedModels: ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-flash"],
     keyPlaceholder: "sk-...",
-    docsHint: "使用 DeepSeek OpenAI 兼容接口",
+    docsHint: "使用 DeepSeek V4 官方接口",
   },
   {
     id: "openrouter",
     name: "OpenRouter",
     baseUrl: "https://openrouter.ai/api/v1",
-    defaultModel: "anthropic/claude-sonnet-4",
+    defaultModel: "anthropic/claude-sonnet-5-5",
     suggestedModels: [
-      "anthropic/claude-sonnet-4",
-      "google/gemini-2.5-pro",
-      "openai/gpt-4.1",
+      "anthropic/claude-sonnet-5-5",
+      "anthropic/claude-opus-5.5",
+      "openai/gpt-6.2-sol",
+      "google/gemini-4-hydrogen",
+      "deepseek/deepseek-v4.1-flash",
     ],
     keyPlaceholder: "sk-or-...",
-    docsHint: "通过 OpenRouter 调用任意主流模型",
+    docsHint: "通过 OpenRouter 调用最新主流模型",
   },
   {
     id: "custom",
     name: "自定义接口",
     baseUrl: "https://api.openai.com/v1",
-    defaultModel: "gpt-4o",
+    defaultModel: "gpt-6.2-sol",
     suggestedModels: [],
     keyPlaceholder: "输入 API Key",
     docsHint: "支持自定义接口地址与模型名称",
@@ -209,7 +216,6 @@ export const DEFAULT_MODEL_CONFIG: ModelConfig = {
   provider: "openai",
   baseUrl: "https://api.openai.com/v1",
   apiKey: "",
-  model: "gpt-4.1",
+  model: "gpt-6.2-sol",
   maxIterations: 12,
-  temperature: 0.2,
 };
