@@ -16,6 +16,9 @@ export interface SupabaseProjectRow {
   files: ProjectFiles | null;
   messages: ChatMessage[] | null;
   snapshots: ProjectSnapshot[] | null;
+  agent_status?: string | null;
+  agent_job_id?: string | null;
+  agent_updated_at?: string | null;
   created_at: string;
   updated_at: string;
 }

@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { startBackgroundAgentJob } from "@/lib/agent-runner";
+import { after, NextRequest, NextResponse } from "next/server";
+import { prepareBackgroundAgentJob } from "@/lib/agent-runner";
 import type { ModelConfig, Project } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -42,16 +42,24 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { job, alreadyRunning } = startBackgroundAgentJob({
+  const prepared = await prepareBackgroundAgentJob({
     project,
     prompt,
     config,
   });
 
+  // Schedule execution inside Next.js after() so Vercel Serverless keeps the function alive via waitUntil()
+  if (prepared.execute) {
+    const runTask = prepared.execute;
+    after(async () => {
+      await runTask();
+    });
+  }
+
   return NextResponse.json({
     ok: true,
-    jobId: job.jobId,
-    alreadyRunning,
-    project: job.projectState,
+    jobId: prepared.jobId,
+    alreadyRunning: prepared.alreadyRunning,
+    project: prepared.project,
   });
 }

@@ -120,6 +120,8 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
         });
       };
 
+      let shouldReconnect = false;
+
       try {
         const res = await fetch(
           `/api/agent/stream?projectId=${encodeURIComponent(targetProjectId)}`,
@@ -137,10 +139,12 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
         const reader = res.body.getReader();
         const decoder = new TextDecoder("utf-8");
         let buffer = "";
+        let lastKnownRunning = false;
 
         const applyEvent = (event: AgentStreamEvent) => {
           switch (event.type) {
             case "idle": {
+              lastKnownRunning = false;
               setIsRunning(false);
               break;
             }
@@ -148,11 +152,25 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
             case "job_snapshot": {
               setProjectAndRef(event.project);
               mirrorProjectLocally(event.project);
-              setIsRunning(event.status === "running");
+              const stillActive = event.status === "running";
+              lastKnownRunning = stillActive;
+              setIsRunning(stillActive);
+              if (
+                event.status === "done" &&
+                Object.keys(event.project.files).length > 0
+              ) {
+                const lastAssistant = [...event.project.messages]
+                  .reverse()
+                  .find((m) => m.role === "assistant");
+                if (lastAssistant?.filesChanged?.length) {
+                  setRightTab("preview");
+                }
+              }
               break;
             }
 
             case "thought_delta": {
+              lastKnownRunning = true;
               setIsRunning(true);
               patchLastAssistantMsg((m) => {
                 const steps = [...(m.steps ?? [])];
@@ -268,6 +286,7 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
             }
 
             case "done": {
+              lastKnownRunning = false;
               if (event.project) {
                 setProjectAndRef(event.project);
                 mirrorProjectLocally(event.project);
@@ -283,6 +302,7 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
             }
 
             case "error": {
+              lastKnownRunning = false;
               patchLastAssistantMsg((m) => ({
                 ...m,
                 status: event.aborted ? "aborted" : "error",
@@ -319,6 +339,11 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
             }
           }
         }
+
+        // Seamless SSE rotation for long-running Serverless tasks
+        if (lastKnownRunning && !controller.signal.aborted) {
+          shouldReconnect = true;
+        }
       } catch (err) {
         if (err instanceof Error && err.name === "AbortError") {
           return;
@@ -327,6 +352,13 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
       } finally {
         if (streamAbortRef.current === controller) {
           streamAbortRef.current = null;
+        }
+        if (shouldReconnect && !controller.signal.aborted) {
+          setTimeout(() => {
+            if (!streamAbortRef.current) {
+              void attachToJobStream(targetProjectId);
+            }
+          }, 400);
         }
       }
     },

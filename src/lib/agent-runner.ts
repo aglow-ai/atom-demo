@@ -3,6 +3,8 @@ import { compileProject, normalizeProjectFiles } from "./compiler";
 import {
   getSupabaseServerClient,
   PROJECTS_TABLE,
+  rowToProject,
+  type SupabaseProjectRow,
 } from "./supabase-server";
 import { REACT_AGENT_SYSTEM_PROMPT } from "./system-prompt";
 import type {
@@ -13,6 +15,8 @@ import type {
   ProjectFiles,
   ReActStep,
 } from "./types";
+
+const JOB_STALE_MS = 5 * 60 * 1000; // 5 min heartbeat expiry for crashed serverless containers
 
 interface ChatCompletionMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -62,6 +66,14 @@ export interface ActiveAgentJob {
   persistChain: Promise<void>;
   createdAt: number;
   finishedAt?: number;
+}
+
+export interface RemoteJobState {
+  project: Project;
+  agentStatus: "idle" | "running" | "stop_requested" | "done" | "error" | "aborted";
+  agentJobId: string | null;
+  agentUpdatedAt: number;
+  isStale: boolean;
 }
 
 declare global {
@@ -116,39 +128,72 @@ async function parseUpstreamError(response: Response): Promise<string> {
   }
 }
 
-async function persistProjectToSupabase(project: Project): Promise<void> {
+async function persistInitialJobState(job: ActiveAgentJob): Promise<void> {
   const supabase = getSupabaseServerClient();
   if (!supabase) return;
+  const nowIso = new Date().toISOString();
   try {
     await supabase.from(PROJECTS_TABLE).upsert(
       {
-        id: project.id,
-        name: project.name || "未命名应用",
-        description: project.description || "",
-        files: project.files,
-        messages: project.messages,
-        snapshots: project.snapshots,
-        updated_at: new Date(project.updatedAt || Date.now()).toISOString(),
+        id: job.projectState.id,
+        name: job.projectState.name || "未命名应用",
+        description: job.projectState.description || "",
+        files: job.projectState.files,
+        messages: job.projectState.messages,
+        snapshots: job.projectState.snapshots,
+        agent_status: "running",
+        agent_job_id: job.jobId,
+        agent_updated_at: nowIso,
+        updated_at: nowIso,
       },
       { onConflict: "id" }
     );
   } catch {
-    // Non-fatal: keep background job running even if transient DB blip occurs
+    // Non-fatal fallback
   }
 }
 
-function queuePersist(job: ActiveAgentJob): Promise<void> {
-  const snapshotCopy: Project = {
-    ...job.projectState,
-    files: { ...job.projectState.files },
-    messages: job.projectState.messages.map((m) => ({
-      ...m,
-      steps: m.steps ? m.steps.map((s) => ({ ...s })) : undefined,
-    })),
-    snapshots: [...job.projectState.snapshots],
-  };
+async function persistProgressToSupabase(
+  project: Project,
+  jobId: string,
+  finalStatus?: "done" | "error" | "aborted"
+): Promise<void> {
+  const supabase = getSupabaseServerClient();
+  if (!supabase) return;
+  const nowIso = new Date().toISOString();
+  try {
+    const payload: Record<string, unknown> = {
+      name: project.name || "未命名应用",
+      description: project.description || "",
+      files: project.files,
+      messages: project.messages,
+      snapshots: project.snapshots,
+      agent_updated_at: nowIso,
+      updated_at: nowIso,
+    };
+    // Only set agent_status on terminal transitions so we never overwrite 'stop_requested' mid-run
+    if (finalStatus) {
+      payload.agent_status = finalStatus;
+    }
+
+    await supabase
+      .from(PROJECTS_TABLE)
+      .update(payload)
+      .eq("id", project.id)
+      .eq("agent_job_id", jobId);
+  } catch {
+    // Non-fatal
+  }
+}
+
+function queuePersist(
+  job: ActiveAgentJob,
+  finalStatus?: "done" | "error" | "aborted"
+): Promise<void> {
+  const snapshotCopy = cloneProject(job.projectState);
+  const jobId = job.jobId;
   job.persistChain = job.persistChain
-    .then(() => persistProjectToSupabase(snapshotCopy))
+    .then(() => persistProgressToSupabase(snapshotCopy, jobId, finalStatus))
     .catch(() => {});
   return job.persistChain;
 }
@@ -187,6 +232,63 @@ function cloneProject(project: Project): Project {
       files: { ...s.files },
     })),
   };
+}
+
+/**
+ * Check remote Supabase state for cross-instance SSE streaming & dedupe
+ */
+export async function fetchRemoteProjectJobState(
+  projectId: string
+): Promise<RemoteJobState | null> {
+  const supabase = getSupabaseServerClient();
+  if (!supabase) return null;
+
+  const { data, error } = await supabase
+    .from(PROJECTS_TABLE)
+    .select("*")
+    .eq("id", projectId)
+    .maybeSingle();
+
+  if (error || !data) return null;
+
+  const row = data as SupabaseProjectRow;
+  const project = rowToProject(row);
+  const rawStatus = (row.agent_status || "idle") as RemoteJobState["agentStatus"];
+  const agentUpdatedAt = row.agent_updated_at
+    ? new Date(row.agent_updated_at).getTime()
+    : project.updatedAt;
+  const isStale =
+    (rawStatus === "running" || rawStatus === "stop_requested") &&
+    Date.now() - agentUpdatedAt > JOB_STALE_MS;
+
+  return {
+    project,
+    agentStatus: isStale ? "error" : rawStatus,
+    agentJobId: row.agent_job_id || null,
+    agentUpdatedAt,
+    isStale,
+  };
+}
+
+async function isStopRequestedInSupabase(
+  projectId: string,
+  jobId: string
+): Promise<boolean> {
+  const supabase = getSupabaseServerClient();
+  if (!supabase) return false;
+  try {
+    const { data } = await supabase
+      .from(PROJECTS_TABLE)
+      .select("agent_status, agent_job_id")
+      .eq("id", projectId)
+      .maybeSingle();
+    if (!data) return false;
+    return (
+      data.agent_job_id === jobId && data.agent_status === "stop_requested"
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -535,27 +637,85 @@ export function getAgentJob(projectId: string): ActiveAgentJob | undefined {
   return getJobsMap().get(projectId);
 }
 
-export function stopAgentJob(projectId: string): boolean {
-  const job = getJobsMap().get(projectId);
-  if (!job || job.status !== "running") return false;
-  job.abortController.abort();
-  return true;
+/**
+ * Stop a running job both locally (same instance fast path) and in Supabase (cross-instance Serverless)
+ */
+export async function requestStopAgentJob(projectId: string): Promise<boolean> {
+  let stopped = false;
+
+  const localJob = getJobsMap().get(projectId);
+  if (localJob && localJob.status === "running") {
+    localJob.abortController.abort();
+    stopped = true;
+  }
+
+  const supabase = getSupabaseServerClient();
+  if (supabase) {
+    try {
+      const { data } = await supabase
+        .from(PROJECTS_TABLE)
+        .update({
+          agent_status: "stop_requested",
+          agent_updated_at: new Date().toISOString(),
+        })
+        .eq("id", projectId)
+        .eq("agent_status", "running")
+        .select("id");
+      if (Array.isArray(data) && data.length > 0) {
+        stopped = true;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return stopped;
 }
 
-export function startBackgroundAgentJob(params: {
+/**
+ * Prepare a new background job, persist initial running state to Supabase,
+ * and return an `execute()` function to be scheduled via Next.js `after()`.
+ */
+export async function prepareBackgroundAgentJob(params: {
   project: Project;
   prompt: string;
   config: ModelConfig;
-}): { job: ActiveAgentJob; alreadyRunning: boolean } {
+}): Promise<{
+  alreadyRunning: boolean;
+  jobId: string;
+  project: Project;
+  execute?: () => Promise<void>;
+}> {
   const jobs = getJobsMap();
-  const existing = jobs.get(params.project.id);
-  if (existing && existing.status === "running") {
-    return { job: existing, alreadyRunning: true };
+  const existingLocal = jobs.get(params.project.id);
+  if (existingLocal && existingLocal.status === "running") {
+    return {
+      alreadyRunning: true,
+      jobId: existingLocal.jobId,
+      project: cloneProject(existingLocal.projectState),
+    };
+  }
+
+  // Check Supabase in case another Serverless container is already running a job for this project
+  const remoteState = await fetchRemoteProjectJobState(params.project.id);
+  if (
+    remoteState &&
+    !remoteState.isStale &&
+    (remoteState.agentStatus === "running" ||
+      remoteState.agentStatus === "stop_requested")
+  ) {
+    return {
+      alreadyRunning: true,
+      jobId: remoteState.agentJobId || `remote_${params.project.id}`,
+      project: remoteState.project,
+    };
   }
 
   const now = Date.now();
   const prompt = params.prompt.trim();
-  const baseProject = cloneProject(params.project);
+  const baseProject = cloneProject(
+    remoteState ? remoteState.project : params.project
+  );
   baseProject.files = normalizeProjectFiles(baseProject.files || {});
 
   const shouldAutoName =
@@ -614,13 +774,15 @@ export function startBackgroundAgentJob(params: {
 
   jobs.set(baseProject.id, job);
 
-  // Immediately persist user message + streaming placeholder to Supabase
-  queuePersist(job);
+  // Persist initial 'running' state BEFORE returning HTTP 200 so cross-instance streams see it immediately
+  await persistInitialJobState(job);
 
-  // Detach and run the ReAct loop completely independent of HTTP request lifecycle
-  void runJobLoop(job, historySnapshot, params.config);
-
-  return { job, alreadyRunning: false };
+  return {
+    alreadyRunning: false,
+    jobId: job.jobId,
+    project: cloneProject(job.projectState),
+    execute: () => runJobLoop(job, historySnapshot, params.config),
+  };
 }
 
 async function runJobLoop(
@@ -641,6 +803,28 @@ async function runJobLoop(
   const initialFiles: ProjectFiles = { ...job.projectState.files };
   const workingFiles: ProjectFiles = { ...job.projectState.files };
   const changedFilesSet = new Set<string>();
+
+  // Throttled Supabase flush for streaming thought deltas (keeps cross-instance SSE smooth!)
+  let deltaFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  const scheduleDeltaPersist = () => {
+    if (deltaFlushTimer) return;
+    deltaFlushTimer = setTimeout(() => {
+      deltaFlushTimer = null;
+      if (job.status === "running") {
+        void queuePersist(job);
+      }
+    }, 750);
+  };
+
+  // Cross-instance stop polling (so POST /api/agent/stop hitting another Vercel container still aborts this job)
+  const stopPollTimer = setInterval(() => {
+    if (signal.aborted || job.status !== "running") return;
+    void isStopRequestedInSupabase(job.projectId, job.jobId).then((stopReq) => {
+      if (stopReq && !signal.aborted) {
+        job.abortController.abort();
+      }
+    });
+  }, 1200);
 
   try {
     const workspaceContext = buildWorkspaceContextMessage(workingFiles);
@@ -671,6 +855,10 @@ async function runJobLoop(
 
     for (let iteration = 1; iteration <= maxIterations; iteration++) {
       if (signal.aborted) break;
+      if (await isStopRequestedInSupabase(job.projectId, job.jobId)) {
+        job.abortController.abort();
+        break;
+      }
 
       completedIterations = iteration;
       broadcast(job, { type: "iteration_start", iteration, maxIterations });
@@ -698,6 +886,7 @@ async function runJobLoop(
           return { ...m, steps };
         });
         broadcast(job, { type: "thought_delta", iteration, delta });
+        scheduleDeltaPersist();
       };
 
       let content = "";
@@ -842,6 +1031,7 @@ async function runJobLoop(
             toolName: tc.name,
             args: uiArgs,
           });
+          void queuePersist(job);
 
           const toolStartMs = Date.now();
           let ok = false;
@@ -927,9 +1117,8 @@ async function runJobLoop(
             files: { ...workingFiles },
             changedFiles: changed,
           });
-          // Save incremental progress to Supabase
-          queuePersist(job);
         }
+        void queuePersist(job);
 
         continue;
       }
@@ -987,6 +1176,7 @@ async function runJobLoop(
             ok: false,
             durationMs: 2,
           });
+          void queuePersist(job);
 
           const fixInstruction = `系统自动校验未通过，发现以下错误，请立即修复并调用 validate_project 确认通过：\n${autoErrSummary}`;
           if (useResponses) {
@@ -1076,7 +1266,7 @@ async function runJobLoop(
     job.status = "done";
     job.finishedAt = Date.now();
 
-    await queuePersist(job);
+    await queuePersist(job, "done");
 
     broadcast(job, {
       type: "done",
@@ -1096,19 +1286,20 @@ async function runJobLoop(
       ? err.message
       : "智能体运行过程中发生未知错误。";
 
-    job.status = isAbort ? "aborted" : "error";
+    const terminalStatus = isAbort ? "aborted" : "error";
+    job.status = terminalStatus;
     job.finishedAt = Date.now();
 
     patchAssistantMessage(job, (m) => ({
       ...m,
-      status: isAbort ? "aborted" : "error",
+      status: terminalStatus,
       error: errMsg,
       steps: (m.steps ?? []).map((s) =>
         s.status === "running" ? { ...s, status: "error" } : s
       ),
     }));
 
-    await queuePersist(job);
+    await queuePersist(job, terminalStatus);
 
     broadcast(job, {
       type: "error",
@@ -1116,7 +1307,9 @@ async function runJobLoop(
       aborted: isAbort,
     });
   } finally {
-    // Keep finished job snapshot cached briefly (2 min) for quick page reloads, then release
+    if (deltaFlushTimer) clearTimeout(deltaFlushTimer);
+    clearInterval(stopPollTimer);
+
     const finishedJobId = job.jobId;
     setTimeout(() => {
       const jobs = getJobsMap();

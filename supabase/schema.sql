@@ -8,6 +8,9 @@ create table if not exists public.atoms_projects (
   files jsonb not null default '{}'::jsonb,
   messages jsonb not null default '[]'::jsonb,
   snapshots jsonb not null default '[]'::jsonb,
+  agent_status text not null default 'idle',
+  agent_job_id text,
+  agent_updated_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );

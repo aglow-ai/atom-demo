@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { stopAgentJob } from "@/lib/agent-runner";
+import { requestStopAgentJob } from "@/lib/agent-runner";
 
 export const runtime = "nodejs";
 
@@ -14,7 +14,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const stopped = stopAgentJob(projectId);
+    const stopped = await requestStopAgentJob(projectId);
     return NextResponse.json({ ok: true, stopped });
   } catch {
     return NextResponse.json(
