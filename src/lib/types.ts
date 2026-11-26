@@ -118,6 +118,13 @@ export interface CompileResult {
 }
 
 export type AgentStreamEvent =
+  | { type: "idle" }
+  | {
+      type: "job_snapshot";
+      jobId: string;
+      status: "running" | "done" | "error" | "aborted";
+      project: Project;
+    }
   | { type: "iteration_start"; iteration: number; maxIterations: number }
   | { type: "thought_delta"; iteration: number; delta: string }
   | { type: "thought_done"; iteration: number; content: string }
@@ -145,8 +152,10 @@ export type AgentStreamEvent =
       files: ProjectFiles;
       changedFiles: string[];
       iterations: number;
+      snapshotId?: string;
+      project?: Project;
     }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string; aborted?: boolean };
 
 export const MODEL_PRESETS: ModelPreset[] = [
   {

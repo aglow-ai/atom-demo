@@ -12,8 +12,10 @@ import {
 } from "@/lib/project-client";
 import {
   loadModelConfig,
+  loadProjects as loadLocalProjects,
   loadTheme,
   saveModelConfig,
+  saveProjects as saveLocalProjects,
   saveTheme,
 } from "@/lib/storage";
 import {
@@ -22,7 +24,6 @@ import {
   type ChatMessage,
   type ModelConfig,
   type Project,
-  type ProjectFiles,
   type ReActStep,
 } from "@/lib/types";
 import { ChatPanel } from "./ChatPanel";
@@ -33,6 +34,15 @@ import { TopBar } from "./TopBar";
 
 interface AtomsWorkbenchProps {
   projectId: string;
+}
+
+function mirrorProjectLocally(project: Project) {
+  const all = loadLocalProjects();
+  const exists = all.some((p) => p.id === project.id);
+  const next = exists
+    ? all.map((p) => (p.id === project.id ? project : p))
+    : [project, ...all];
+  saveLocalProjects(next);
 }
 
 export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
@@ -55,15 +65,14 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
   const [leftWidthPct, setLeftWidthPct] = useState(38);
   const isDraggingRef = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
+  const streamAbortRef = useRef<AbortController | null>(null);
   const projectRef = useRef<Project | null>(null);
   const pendingPromptHandledRef = useRef(false);
 
   const setProjectAndRef = useCallback(
     (updater: Project | null | ((prev: Project | null) => Project | null)) => {
       setProject((prev) => {
-        const next =
-          typeof updater === "function" ? updater(prev) : updater;
+        const next = typeof updater === "function" ? updater(prev) : updater;
         projectRef.current = next;
         return next;
       });
@@ -92,7 +101,254 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
     [showToast]
   );
 
-  // Load project
+  /**
+   * Subscribe (or reconnect after refresh) to the server-side background job stream.
+   * Closing/aborting this reader only detaches the browser — the background job keeps running!
+   */
+  const attachToJobStream = useCallback(
+    async (targetProjectId: string) => {
+      streamAbortRef.current?.abort();
+      const controller = new AbortController();
+      streamAbortRef.current = controller;
+
+      const patchLastAssistantMsg = (
+        patcher: (msg: ChatMessage) => ChatMessage
+      ) => {
+        setProjectAndRef((p) => {
+          if (!p) return p;
+          let targetIdx = -1;
+          for (let i = p.messages.length - 1; i >= 0; i--) {
+            if (p.messages[i].role === "assistant") {
+              targetIdx = i;
+              break;
+            }
+          }
+          if (targetIdx === -1) return p;
+          return {
+            ...p,
+            updatedAt: Date.now(),
+            messages: p.messages.map((m, idx) =>
+              idx === targetIdx ? patcher(m) : m
+            ),
+          };
+        });
+      };
+
+      try {
+        const res = await fetch(
+          `/api/agent/stream?projectId=${encodeURIComponent(targetProjectId)}`,
+          {
+            cache: "no-store",
+            signal: controller.signal,
+          }
+        );
+
+        if (!res.ok || !res.body) {
+          setIsRunning(false);
+          return;
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let buffer = "";
+
+        const applyEvent = (event: AgentStreamEvent) => {
+          switch (event.type) {
+            case "idle": {
+              setIsRunning(false);
+              break;
+            }
+
+            case "job_snapshot": {
+              setProjectAndRef(event.project);
+              mirrorProjectLocally(event.project);
+              setIsRunning(event.status === "running");
+              if (event.status === "done") {
+                setSyncState("saved");
+              }
+              break;
+            }
+
+            case "thought_delta": {
+              setIsRunning(true);
+              patchLastAssistantMsg((m) => {
+                const steps = [...(m.steps ?? [])];
+                const thoughtId = `thought_${event.iteration}`;
+                const idx = steps.findIndex((s) => s.id === thoughtId);
+                if (idx === -1) {
+                  steps.push({
+                    id: thoughtId,
+                    iteration: event.iteration,
+                    type: "thought",
+                    content: event.delta,
+                    status: "running",
+                    timestamp: Date.now(),
+                  });
+                } else {
+                  steps[idx] = {
+                    ...steps[idx],
+                    content: (steps[idx].content ?? "") + event.delta,
+                  };
+                }
+                return { ...m, steps };
+              });
+              break;
+            }
+
+            case "thought_done": {
+              patchLastAssistantMsg((m) => {
+                const steps = [...(m.steps ?? [])];
+                const thoughtId = `thought_${event.iteration}`;
+                const idx = steps.findIndex((s) => s.id === thoughtId);
+                if (idx === -1) {
+                  steps.push({
+                    id: thoughtId,
+                    iteration: event.iteration,
+                    type: "thought",
+                    content: event.content,
+                    status: "success",
+                    timestamp: Date.now(),
+                  });
+                } else {
+                  steps[idx] = {
+                    ...steps[idx],
+                    content: event.content,
+                    status: "success",
+                  };
+                }
+                return { ...m, steps };
+              });
+              break;
+            }
+
+            case "tool_start": {
+              setIsRunning(true);
+              patchLastAssistantMsg((m) => {
+                const steps: ReActStep[] = [
+                  ...(m.steps ?? []).map((s) =>
+                    s.type === "thought" && s.iteration === event.iteration
+                      ? { ...s, status: "success" as const }
+                      : s
+                  ),
+                  {
+                    id: event.toolCallId,
+                    iteration: event.iteration,
+                    type: "tool_call",
+                    toolCallId: event.toolCallId,
+                    toolName: event.toolName,
+                    toolArgs: event.args,
+                    status: "running",
+                    timestamp: Date.now(),
+                  },
+                ];
+                return { ...m, steps };
+              });
+              break;
+            }
+
+            case "tool_result": {
+              patchLastAssistantMsg((m) => ({
+                ...m,
+                steps: (m.steps ?? []).map((s) =>
+                  s.id === event.toolCallId
+                    ? {
+                        ...s,
+                        toolResult: event.result,
+                        status: (event.ok ? "success" : "error") as
+                          | "success"
+                          | "error",
+                        durationMs: event.durationMs,
+                      }
+                    : s
+                ),
+              }));
+              break;
+            }
+
+            case "files_sync": {
+              setProjectAndRef((p) => {
+                if (!p) return p;
+                const next = {
+                  ...p,
+                  files: { ...event.files },
+                  updatedAt: Date.now(),
+                };
+                mirrorProjectLocally(next);
+                return next;
+              });
+              if (event.changedFiles.length > 0) {
+                setActiveFile(
+                  event.changedFiles[event.changedFiles.length - 1]
+                );
+              }
+              break;
+            }
+
+            case "done": {
+              if (event.project) {
+                setProjectAndRef(event.project);
+                mirrorProjectLocally(event.project);
+              }
+              setIsRunning(false);
+              setSyncState("saved");
+              if (Object.keys(event.files).length > 0) {
+                setRightTab("preview");
+              }
+              break;
+            }
+
+            case "error": {
+              patchLastAssistantMsg((m) => ({
+                ...m,
+                status: event.aborted ? "aborted" : "error",
+                error: event.message,
+                steps: (m.steps ?? []).map((s) =>
+                  s.status === "running" ? { ...s, status: "error" } : s
+                ),
+              }));
+              if (projectRef.current) {
+                mirrorProjectLocally(projectRef.current);
+              }
+              setIsRunning(false);
+              break;
+            }
+          }
+        };
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() ?? "";
+
+          for (const part of parts) {
+            const line = part.split("\n").find((l) => l.startsWith("data:"));
+            if (!line) continue;
+            try {
+              const evt = JSON.parse(line.slice(5).trim()) as AgentStreamEvent;
+              applyEvent(evt);
+            } catch {
+              // ignore malformed SSE chunk
+            }
+          }
+        }
+      } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") {
+          return;
+        }
+        setIsRunning(false);
+      } finally {
+        if (streamAbortRef.current === controller) {
+          streamAbortRef.current = null;
+        }
+      }
+    },
+    [setProjectAndRef]
+  );
+
+  // Load project + auto-reattach to any running background job on mount/refresh
   useEffect(() => {
     let active = true;
     const savedTheme = loadTheme();
@@ -112,6 +368,8 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
         } else {
           setProjectAndRef(loaded.project);
           setSyncState("saved");
+          // Automatically reconnect if a background job is currently running (or just finished)
+          void attachToJobStream(projectId);
         }
       } finally {
         if (active) setLoading(false);
@@ -121,8 +379,10 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
     init();
     return () => {
       active = false;
+      // Detach SSE listener on unmount — background job continues running on server!
+      streamAbortRef.current?.abort();
     };
-  }, [projectId, setProjectAndRef]);
+  }, [projectId, setProjectAndRef, attachToJobStream]);
 
   // Split pane dragging handlers
   useEffect(() => {
@@ -190,8 +450,18 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
     await persistProject(updated);
   };
 
-  const handleStop = () => {
-    abortControllerRef.current?.abort();
+  const handleStop = async () => {
+    const cur = projectRef.current;
+    if (!cur) return;
+    try {
+      await fetch("/api/agent/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId: cur.id }),
+      });
+    } catch {
+      // ignore
+    }
   };
 
   const runAgent = useCallback(
@@ -208,331 +478,41 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
         return;
       }
 
-      const now = Date.now();
-      const userMsg: ChatMessage = {
-        id: `msg_u_${now}`,
-        role: "user",
-        content: prompt,
-        createdAt: now,
-      };
-      const assistantMsgId = `msg_a_${now + 1}`;
-      const assistantMsg: ChatMessage = {
-        id: assistantMsgId,
-        role: "assistant",
-        content: "",
-        steps: [],
-        status: "streaming",
-        createdAt: now + 1,
-      };
-
-      const shouldAutoName =
-        curProject.messages.length === 0 &&
-        (curProject.name === "未命名应用" ||
-          /^(?:新)?应用 #\d+$/.test(curProject.name));
-      const inferredName = shouldAutoName
-        ? prompt.replace(/\s+/g, " ").slice(0, 18)
-        : curProject.name;
-
-      const historyPayload = curProject.messages
-        .filter((m) => m.content.trim().length > 0)
-        .map((m) => ({ role: m.role, content: m.content }));
-
-      const currentFilesSnapshot: ProjectFiles = { ...curProject.files };
-
-      setProjectAndRef((p) => {
-        if (!p) return p;
-        return {
-          ...p,
-          name: inferredName,
-          description: p.description || prompt.slice(0, 140),
-          messages: [...p.messages, userMsg, assistantMsg],
-          updatedAt: Date.now(),
-        };
-      });
-
       setIsRunning(true);
-      const controller = new AbortController();
-      abortControllerRef.current = controller;
-
-      const patchAssistantMsg = (
-        patcher: (msg: ChatMessage) => ChatMessage
-      ) => {
-        setProjectAndRef((p) => {
-          if (!p) return p;
-          return {
-            ...p,
-            messages: p.messages.map((m) =>
-              m.id === assistantMsgId ? patcher(m) : m
-            ),
-            updatedAt: Date.now(),
-          };
-        });
-      };
+      setSyncState("saving");
 
       try {
         const res = await fetch("/api/agent/run", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            project: curProject,
             prompt,
-            files: currentFilesSnapshot,
-            history: historyPayload,
             config: cfg,
           }),
-          signal: controller.signal,
         });
 
-        if (!res.ok || !res.body) {
-          let errMsg = `请求失败 (HTTP ${res.status})`;
-          try {
-            const j = await res.json();
-            if (j?.error) errMsg = j.error;
-          } catch {
-            // ignore
-          }
-          patchAssistantMsg((m) => ({
-            ...m,
-            status: "error",
-            error: errMsg,
-          }));
-          if (projectRef.current) await persistProject(projectRef.current);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) {
+          setIsRunning(false);
+          setSyncState("error");
+          showToast(data.error || `启动失败 (HTTP ${res.status})`);
           return;
         }
 
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder("utf-8");
-        let buffer = "";
-
-        const applyEvent = (event: AgentStreamEvent) => {
-          switch (event.type) {
-            case "thought_delta": {
-              patchAssistantMsg((m) => {
-                const steps = [...(m.steps ?? [])];
-                const thoughtId = `thought_${event.iteration}`;
-                const idx = steps.findIndex((s) => s.id === thoughtId);
-                if (idx === -1) {
-                  steps.push({
-                    id: thoughtId,
-                    iteration: event.iteration,
-                    type: "thought",
-                    content: event.delta,
-                    status: "running",
-                    timestamp: Date.now(),
-                  });
-                } else {
-                  steps[idx] = {
-                    ...steps[idx],
-                    content: (steps[idx].content ?? "") + event.delta,
-                  };
-                }
-                return { ...m, steps };
-              });
-              break;
-            }
-
-            case "thought_done": {
-              patchAssistantMsg((m) => {
-                const steps = [...(m.steps ?? [])];
-                const thoughtId = `thought_${event.iteration}`;
-                const idx = steps.findIndex((s) => s.id === thoughtId);
-                if (idx === -1) {
-                  steps.push({
-                    id: thoughtId,
-                    iteration: event.iteration,
-                    type: "thought",
-                    content: event.content,
-                    status: "success",
-                    timestamp: Date.now(),
-                  });
-                } else {
-                  steps[idx] = {
-                    ...steps[idx],
-                    content: event.content,
-                    status: "success",
-                  };
-                }
-                return { ...m, steps };
-              });
-              break;
-            }
-
-            case "tool_start": {
-              patchAssistantMsg((m) => {
-                const steps: ReActStep[] = [
-                  ...(m.steps ?? []).map((s) =>
-                    s.type === "thought" && s.iteration === event.iteration
-                      ? { ...s, status: "success" as const }
-                      : s
-                  ),
-                  {
-                    id: event.toolCallId,
-                    iteration: event.iteration,
-                    type: "tool_call",
-                    toolCallId: event.toolCallId,
-                    toolName: event.toolName,
-                    toolArgs: event.args,
-                    status: "running",
-                    timestamp: Date.now(),
-                  },
-                ];
-                return { ...m, steps };
-              });
-              break;
-            }
-
-            case "tool_result": {
-              patchAssistantMsg((m) => {
-                const steps = (m.steps ?? []).map((s) =>
-                  s.id === event.toolCallId
-                    ? {
-                        ...s,
-                        toolResult: event.result,
-                        status: (event.ok ? "success" : "error") as
-                          | "success"
-                          | "error",
-                        durationMs: event.durationMs,
-                      }
-                    : s
-                );
-                return { ...m, steps };
-              });
-              break;
-            }
-
-            case "files_sync": {
-              setProjectAndRef((p) => {
-                if (!p) return p;
-                return {
-                  ...p,
-                  files: { ...event.files },
-                  updatedAt: Date.now(),
-                };
-              });
-              if (event.changedFiles.length > 0) {
-                setActiveFile(
-                  event.changedFiles[event.changedFiles.length - 1]
-                );
-              }
-              break;
-            }
-
-            case "done": {
-              const snapId =
-                Object.keys(event.files).length > 0
-                  ? `snap_${Date.now()}`
-                  : undefined;
-
-              setProjectAndRef((p) => {
-                if (!p) return p;
-                const nextSnapshots = snapId
-                  ? [
-                      ...p.snapshots.slice(-14),
-                      {
-                        id: snapId,
-                        label: prompt.replace(/\s+/g, " ").slice(0, 22),
-                        files: { ...event.files },
-                        createdAt: Date.now(),
-                      },
-                    ]
-                  : p.snapshots;
-
-                return {
-                  ...p,
-                  files: { ...event.files },
-                  snapshots: nextSnapshots,
-                  updatedAt: Date.now(),
-                  messages: p.messages.map((m) => {
-                    if (m.id !== assistantMsgId) return m;
-                    const cleanedSteps = (m.steps ?? [])
-                      .map((s) =>
-                        s.status === "running"
-                          ? { ...s, status: "success" as const }
-                          : s
-                      )
-                      .filter((s, i, arr) => {
-                        if (
-                          i === arr.length - 1 &&
-                          s.type === "thought" &&
-                          s.content?.trim() === event.summary.trim()
-                        ) {
-                          return false;
-                        }
-                        return true;
-                      });
-                    return {
-                      ...m,
-                      content: event.summary,
-                      steps: cleanedSteps,
-                      filesChanged: event.changedFiles,
-                      snapshotId: snapId,
-                      status: "done",
-                    };
-                  }),
-                };
-              });
-
-              if (Object.keys(event.files).length > 0) {
-                setRightTab("preview");
-              }
-              break;
-            }
-
-            case "error": {
-              patchAssistantMsg((m) => ({
-                ...m,
-                status: "error",
-                error: event.message,
-                steps: (m.steps ?? []).map((s) =>
-                  s.status === "running" ? { ...s, status: "error" } : s
-                ),
-              }));
-              break;
-            }
-          }
-        };
-
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-
-          const parts = buffer.split("\n\n");
-          buffer = parts.pop() ?? "";
-
-          for (const part of parts) {
-            const line = part.split("\n").find((l) => l.startsWith("data:"));
-            if (!line) continue;
-            try {
-              const evt = JSON.parse(line.slice(5).trim()) as AgentStreamEvent;
-              applyEvent(evt);
-            } catch {
-              // ignore malformed SSE fragment
-            }
-          }
+        if (data.project) {
+          setProjectAndRef(data.project as Project);
+          mirrorProjectLocally(data.project as Project);
         }
+
+        void attachToJobStream(curProject.id);
       } catch (err) {
-        const isAbort = err instanceof Error && err.name === "AbortError";
-        patchAssistantMsg((m) => ({
-          ...m,
-          status: isAbort ? "aborted" : "error",
-          error: isAbort
-            ? "已手动停止当前任务。"
-            : err instanceof Error
-            ? err.message
-            : "网络异常，请重试。",
-          steps: (m.steps ?? []).map((s) =>
-            s.status === "running" ? { ...s, status: "error" } : s
-          ),
-        }));
-      } finally {
         setIsRunning(false);
-        abortControllerRef.current = null;
-        if (projectRef.current) {
-          await persistProject(projectRef.current);
-        }
+        setSyncState("error");
+        showToast(err instanceof Error ? err.message : "网络异常，请重试");
       }
     },
-    [isRunning, modelConfig, persistProject, setProjectAndRef]
+    [attachToJobStream, isRunning, modelConfig, setProjectAndRef, showToast]
   );
 
   // Auto-run pending prompt passed from the Home Page
@@ -548,7 +528,7 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
 
   const handleAutoFix = (errorSummary: string) => {
     runAgent(
-      `预览沙箱检测到以下错误，请使用工具检查相关代码并彻底修复，最后调用 validate_project 确认无误：\n\n${errorSummary}`
+      `预览检测到以下异常，请使用工具检查相关代码并彻底修复，最后调用 validate_project 确认无误：\n\n${errorSummary}`
     );
   };
 
@@ -612,7 +592,7 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
         ref={containerRef}
         className="flex-1 flex flex-col lg:flex-row min-h-0 overflow-hidden"
       >
-        {/* Left: Chat & ReAct Timeline */}
+        {/* Left: Chat & Agent Progress */}
         <div
           className="h-1/2 lg:h-full min-w-0 border-b lg:border-b-0 lg:border-r border-zinc-200 dark:border-zinc-800 shrink-0"
           style={{
@@ -688,7 +668,7 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
             {isRunning && (
               <div className="inline-flex items-center gap-1.5 text-[11px] text-violet-500 font-medium">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                <span>智能体正在编写代码…</span>
+                <span>智能体正在后台持续构建…</span>
               </div>
             )}
           </div>
@@ -712,7 +692,7 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
         </div>
       </div>
 
-      {/* Modals */}
+      {/* Settings Modal */}
       <SettingsModal
         open={settingsOpen}
         config={modelConfig}
