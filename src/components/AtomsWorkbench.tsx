@@ -291,7 +291,10 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
               }
               setIsRunning(false);
               setSyncState("saved");
-              if (Object.keys(event.files).length > 0) {
+              if (
+                event.changedFiles.length > 0 &&
+                Object.keys(event.files).length > 0
+              ) {
                 setRightTab("preview");
               }
               break;
@@ -478,6 +481,35 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
         return;
       }
 
+      const baseProjectSnapshot = curProject;
+      const now = Date.now();
+      const optimisticUserMsg: ChatMessage = {
+        id: `msg_u_opt_${now}`,
+        role: "user",
+        content: prompt,
+        createdAt: now,
+      };
+      const optimisticAssistantMsg: ChatMessage = {
+        id: `msg_a_opt_${now + 1}`,
+        role: "assistant",
+        content: "",
+        steps: [],
+        status: "streaming",
+        createdAt: now + 1,
+      };
+
+      setProjectAndRef((p) =>
+        p
+          ? {
+              ...p,
+              messages: [
+                ...p.messages,
+                optimisticUserMsg,
+                optimisticAssistantMsg,
+              ],
+            }
+          : p
+      );
       setIsRunning(true);
       setSyncState("saving");
 
@@ -486,7 +518,7 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            project: curProject,
+            project: baseProjectSnapshot,
             prompt,
             config: cfg,
           }),
@@ -494,9 +526,22 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
 
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.ok) {
+          const errMsg = data.error || `启动失败 (HTTP ${res.status})`;
+          setProjectAndRef((p) =>
+            p
+              ? {
+                  ...p,
+                  messages: p.messages.map((m) =>
+                    m.id === optimisticAssistantMsg.id
+                      ? { ...m, status: "error", error: errMsg }
+                      : m
+                  ),
+                }
+              : p
+          );
           setIsRunning(false);
           setSyncState("error");
-          showToast(data.error || `启动失败 (HTTP ${res.status})`);
+          showToast(errMsg);
           return;
         }
 
@@ -505,11 +550,24 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
           mirrorProjectLocally(data.project as Project);
         }
 
-        void attachToJobStream(curProject.id);
+        void attachToJobStream(baseProjectSnapshot.id);
       } catch (err) {
+        const errMsg = err instanceof Error ? err.message : "网络异常，请重试";
+        setProjectAndRef((p) =>
+          p
+            ? {
+                ...p,
+                messages: p.messages.map((m) =>
+                  m.id === optimisticAssistantMsg.id
+                    ? { ...m, status: "error", error: errMsg }
+                    : m
+                ),
+              }
+            : p
+        );
         setIsRunning(false);
         setSyncState("error");
-        showToast(err instanceof Error ? err.message : "网络异常，请重试");
+        showToast(errMsg);
       }
     },
     [attachToJobStream, isRunning, modelConfig, setProjectAndRef, showToast]

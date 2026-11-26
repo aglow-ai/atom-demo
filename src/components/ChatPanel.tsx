@@ -7,6 +7,7 @@ import {
   Bot,
   FileCode2,
   History,
+  Loader2,
   Settings,
   Sparkles,
   Square,
@@ -187,6 +188,16 @@ export function ChatPanel({
                       onSelectFile={onSelectFile}
                     />
                   )}
+
+                  {msg.status === "streaming" &&
+                    (!msg.steps || msg.steps.length === 0) &&
+                    !msg.content &&
+                    !msg.error && (
+                      <div className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/60 px-3.5 py-2.5 text-xs text-zinc-600 dark:text-zinc-300">
+                        <Loader2 className="h-3.5 w-3.5 text-violet-500 animate-spin shrink-0" />
+                        <span>智能体正在思考并分析需求…</span>
+                      </div>
+                    )}
 
                   {msg.error && (
                     <div className="mb-2.5 flex items-start gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2.5 text-xs text-rose-600 dark:text-rose-300">

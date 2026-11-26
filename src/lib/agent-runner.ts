@@ -163,6 +163,16 @@ function broadcast(job: ActiveAgentJob, event: AgentStreamEvent) {
   }
 }
 
+function areFilesEqual(a: ProjectFiles, b: ProjectFiles): boolean {
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  for (const key of keysA) {
+    if (!(key in b) || a[key] !== b[key]) return false;
+  }
+  return true;
+}
+
 function cloneProject(project: Project): Project {
   return {
     ...project,
@@ -620,6 +630,7 @@ async function runJobLoop(
     ? buildResponsesUrl(config.baseUrl)
     : buildChatCompletionsUrl(config.baseUrl);
 
+  const initialFiles: ProjectFiles = { ...job.projectState.files };
   const workingFiles: ProjectFiles = { ...job.projectState.files };
   const changedFilesSet = new Set<string>();
 
@@ -1001,9 +1012,14 @@ async function runJobLoop(
         "已达到当前设定的最大执行步数，当前生成的代码已同步至右侧工作区。如需继续优化，可直接继续对话或在模型设置中调高最大步数。";
     }
 
-    const changedFiles = Array.from(changedFilesSet);
+    const rawChangedFiles = Array.from(changedFilesSet);
+    const hasCodeChanges =
+      rawChangedFiles.length > 0 && !areFilesEqual(initialFiles, workingFiles);
+    const changedFiles = hasCodeChanges ? rawChangedFiles : [];
     const snapId =
-      Object.keys(workingFiles).length > 0 ? `snap_${Date.now()}` : undefined;
+      hasCodeChanges && Object.keys(workingFiles).length > 0
+        ? `snap_${Date.now()}`
+        : undefined;
 
     const nextSnapshots = snapId
       ? [
