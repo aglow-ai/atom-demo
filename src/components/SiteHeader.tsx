@@ -5,7 +5,6 @@ import Link from "next/link";
 import {
   Atom,
   FolderKanban,
-  Home,
   Moon,
   Settings,
   Sun,
@@ -51,18 +50,6 @@ export function SiteHeader({
           </Link>
 
           <nav className="flex items-center gap-1">
-            <Link
-              href="/"
-              className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors ${
-                activeNav === "home"
-                  ? "bg-zinc-900/5 dark:bg-white/10 text-zinc-900 dark:text-white"
-                  : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800/60"
-              }`}
-            >
-              <Home className="h-3.5 w-3.5" />
-              首页
-            </Link>
-
             <Link
               href="/projects"
               className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors ${

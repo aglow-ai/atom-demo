@@ -10,7 +10,6 @@ import {
   FileCode,
   FolderKanban,
   History,
-  Home,
   Moon,
   Pencil,
   Settings,
@@ -97,15 +96,6 @@ export function TopBar({
           <span className="font-semibold text-sm tracking-tight hidden md:inline">
             Atoms
           </span>
-        </Link>
-
-        <Link
-          href="/"
-          className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors shrink-0"
-          title="返回首页"
-        >
-          <Home className="h-3.5 w-3.5" />
-          <span className="hidden sm:inline">首页</span>
         </Link>
 
         <Link

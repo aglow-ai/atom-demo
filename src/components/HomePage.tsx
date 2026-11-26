@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -60,6 +60,7 @@ export function HomePage() {
 
   const [prompt, setPrompt] = useState("");
   const [creating, setCreating] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -167,6 +168,7 @@ export function HomePage() {
             className="mt-8 rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#111115] shadow-2xl shadow-black/5 dark:shadow-black/40 focus-within:border-violet-500 focus-within:ring-2 focus-within:ring-violet-500/20 transition-all text-left"
           >
             <textarea
+              ref={textareaRef}
               rows={4}
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
@@ -209,7 +211,16 @@ export function HomePage() {
                 key={tpl.title}
                 type="button"
                 disabled={creating}
-                onClick={() => launchProjectWithPrompt(tpl.prompt, tpl.title)}
+                onClick={() => {
+                  setPrompt(tpl.prompt);
+                  requestAnimationFrame(() => {
+                    const el = textareaRef.current;
+                    if (el) {
+                      el.focus();
+                      el.setSelectionRange(el.value.length, el.value.length);
+                    }
+                  });
+                }}
                 className="inline-flex items-center gap-1.5 rounded-full border border-zinc-200 dark:border-zinc-800 bg-white/80 dark:bg-zinc-900/70 hover:border-violet-500/50 hover:bg-violet-500/5 px-3.5 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 transition-all"
               >
                 <span className="font-medium">{tpl.title}</span>
