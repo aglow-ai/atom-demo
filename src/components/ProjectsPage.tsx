@@ -28,6 +28,7 @@ import {
 } from "@/lib/storage";
 import {
   DEFAULT_MODEL_CONFIG,
+  getResolvedModelMode,
   type ModelConfig,
   type ProjectSummary,
 } from "@/lib/types";
@@ -103,7 +104,10 @@ export function ProjectsPage() {
   const handleSaveModelConfig = (next: ModelConfig) => {
     setModelConfig(next);
     saveModelConfig(next);
-    showToast(`已保存模型配置：${next.model}`);
+    const mode = getResolvedModelMode(next);
+    showToast(
+      mode === "system" ? "已切换为系统默认模型" : `已保存自定义模型：${next.model}`
+    );
   };
 
   const handleCreateBlankProject = async () => {

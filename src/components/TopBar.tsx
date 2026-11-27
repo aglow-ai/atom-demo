@@ -15,7 +15,13 @@ import {
   Settings,
   Sun,
 } from "lucide-react";
-import type { ModelConfig, Project } from "@/lib/types";
+import {
+  getResolvedModelMode,
+  isEffectiveModelReady,
+  type ModelConfig,
+  type Project,
+} from "@/lib/types";
+import { useBilling } from "./BillingProvider";
 import { UserMenu } from "./UserMenu";
 
 interface TopBarProps {
@@ -62,11 +68,17 @@ export function TopBar({
     return () => document.removeEventListener("mousedown", handleOutside);
   }, []);
 
-  const isConfigured = Boolean(
-    modelConfig.apiKey.trim() &&
-      modelConfig.baseUrl.trim() &&
-      modelConfig.model.trim()
-  );
+  const { systemModel } = useBilling();
+  const mode = getResolvedModelMode(modelConfig);
+  const isConfigured = isEffectiveModelReady(modelConfig, systemModel);
+  const modelButtonLabel =
+    mode === "system"
+      ? systemModel.available
+        ? `系统 · ${systemModel.model}`
+        : "模型设置"
+      : isConfigured
+        ? modelConfig.model
+        : "模型设置";
   const hasFiles = Object.keys(activeProject.files).length > 0;
 
   const commitRename = () => {
@@ -298,8 +310,8 @@ export function TopBar({
             }`}
           />
           <Settings className="h-3.5 w-3.5" />
-          <span className="max-w-[130px] truncate font-mono text-[11px]">
-            {isConfigured ? modelConfig.model : "模型设置"}
+          <span className="max-w-[140px] truncate font-mono text-[11px]">
+            {modelButtonLabel}
           </span>
         </button>
 

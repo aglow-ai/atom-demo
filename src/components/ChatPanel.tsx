@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   ArrowUp,
   Bot,
+  Coins,
   FileCode2,
   History,
   Loader2,
@@ -229,8 +230,8 @@ export function ChatPanel({
                     </div>
                   )}
 
-                  {/* Footer metadata: changed files + snapshot restore */}
-                  {(msg.filesChanged?.length || msg.snapshotId) && (
+                  {/* Footer metadata: changed files + snapshot restore + token/credits usage */}
+                  {(msg.filesChanged?.length || msg.snapshotId || msg.usage) && (
                     <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
                       {msg.filesChanged?.map((filePath) => (
                         <button
@@ -255,6 +256,41 @@ export function ChatPanel({
                           恢复此版本
                         </button>
                       )}
+                      {msg.usage && msg.usage.totalTokens > 0 && (
+                        <span
+                          className="inline-flex items-center gap-1 rounded-md border border-zinc-200/80 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-900/60 px-2 py-0.5 text-[10px] font-mono text-zinc-500 dark:text-zinc-400"
+                          title={`模型: ${msg.usage.model} | 输入: ${msg.usage.inputTokens.toLocaleString()} | 缓存命中: ${(msg.usage.cachedInputTokens ?? 0).toLocaleString()}${
+                            (msg.usage.cacheWriteTokens ?? 0) > 0
+                              ? ` | 缓存写入: ${(msg.usage.cacheWriteTokens ?? 0).toLocaleString()}`
+                              : ""
+                          } | 输出: ${msg.usage.outputTokens.toLocaleString()} tokens`}
+                        >
+                          {msg.usage.billingMode === "system" && (
+                            <Coins className="h-2.5 w-2.5 text-amber-500 shrink-0" />
+                          )}
+                          <span>
+                            {msg.usage.totalTokens >= 1000
+                              ? `${(msg.usage.totalTokens / 1000).toFixed(1)}k`
+                              : msg.usage.totalTokens}{" "}
+                            tokens
+                          </span>
+                          {(msg.usage.cachedInputTokens ?? 0) > 0 && (
+                            <span className="text-emerald-600 dark:text-emerald-400">
+                              (缓存{" "}
+                              {(msg.usage.cachedInputTokens ?? 0) >= 1000
+                                ? `${((msg.usage.cachedInputTokens ?? 0) / 1000).toFixed(1)}k`
+                                : msg.usage.cachedInputTokens}
+                              )
+                            </span>
+                          )}
+                          {msg.usage.billingMode === "system" &&
+                            msg.usage.creditsCharged > 0 && (
+                              <span className="text-amber-600 dark:text-amber-400">
+                                · -{msg.usage.creditsCharged} 积分
+                              </span>
+                            )}
+                        </span>
+                      )}
                     </div>
                   )}
                 </div>
@@ -268,7 +304,7 @@ export function ChatPanel({
       <div className="border-t border-zinc-200 dark:border-zinc-800/90 p-3 bg-white dark:bg-[#0c0c0f]">
         {!isConfigured && messages.length > 0 && (
           <div className="mb-2 flex items-center justify-between rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-700 dark:text-amber-300">
-            <span>尚未配置 API Key，无法调用大模型</span>
+            <span>尚未配置可用模型，无法调用大模型</span>
             <button
               type="button"
               onClick={onOpenSettings}

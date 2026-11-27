@@ -23,8 +23,14 @@ import {
   saveModelConfig,
   saveTheme,
 } from "@/lib/storage";
-import { DEFAULT_MODEL_CONFIG, type ModelConfig } from "@/lib/types";
+import {
+  DEFAULT_MODEL_CONFIG,
+  getResolvedModelMode,
+  isEffectiveModelReady,
+  type ModelConfig,
+} from "@/lib/types";
 import { useAuth } from "./AuthProvider";
+import { useBilling } from "./BillingProvider";
 import { GoogleIcon } from "./GoogleIcon";
 import { SettingsModal } from "./SettingsModal";
 import { SiteHeader } from "./SiteHeader";
@@ -59,6 +65,7 @@ const STARTER_TEMPLATES = [
 export function HomePage() {
   const router = useRouter();
   const { user, signInWithGoogle } = useAuth();
+  const { systemModel, credits } = useBilling();
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [modelConfig, setModelConfig] =
     useState<ModelConfig>(DEFAULT_MODEL_CONFIG);
@@ -113,11 +120,8 @@ export function HomePage() {
     });
   }, [user, showToast]);
 
-  const isModelConfigured = Boolean(
-    modelConfig.apiKey.trim() &&
-      modelConfig.baseUrl.trim() &&
-      modelConfig.model.trim()
-  );
+  const modelMode = getResolvedModelMode(modelConfig);
+  const isModelConfigured = isEffectiveModelReady(modelConfig, systemModel);
 
   const handleToggleTheme = () => {
     const next = theme === "dark" ? "light" : "dark";
@@ -129,7 +133,12 @@ export function HomePage() {
   const handleSaveModelConfig = (next: ModelConfig) => {
     setModelConfig(next);
     saveModelConfig(next);
-    showToast(`已保存模型配置：${next.model}`);
+    const nextMode = getResolvedModelMode(next);
+    showToast(
+      nextMode === "system"
+        ? `已切换为系统默认模型${systemModel.available ? `：${systemModel.model}` : ""}`
+        : `已保存自定义模型：${next.model}`
+    );
   };
 
   const handleGoogleSignInFromModal = async () => {
@@ -159,6 +168,17 @@ export function HomePage() {
       setPrompt(cleaned);
       setSettingsOpen(true);
       showToast("请先完成模型设置");
+      return;
+    }
+
+    if (
+      modelMode === "system" &&
+      credits &&
+      credits.balance < systemModel.minCreditsPerRun
+    ) {
+      setPrompt(cleaned);
+      setSettingsOpen(true);
+      showToast("积分不足，请切换为自定义 API Key 继续使用");
       return;
     }
 
@@ -237,10 +257,12 @@ export function HomePage() {
             <div className="flex items-center justify-between gap-2 px-4 pb-3.5 pt-1">
               <span className="text-[11px] text-zinc-400">
                 {!user
-                  ? "使用 Google 账号登录后即可创建并保存你的专属项目"
-                  : isModelConfigured
-                    ? "按 Enter 立即生成，Shift + Enter 换行"
-                    : "提示：请先点击右上角「模型设置」"}
+                  ? "新用户 Google 登录即赠 100 积分，零配置开箱体验"
+                  : !isModelConfigured
+                    ? "提示：请先点击右上角「模型设置」"
+                    : modelMode === "system"
+                      ? `使用系统默认模型 (${systemModel.model}) · 按 Token 折算积分`
+                      : "按 Enter 立即生成，Shift + Enter 换行"}
               </span>
               <button
                 type="submit"

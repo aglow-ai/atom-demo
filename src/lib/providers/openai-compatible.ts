@@ -5,6 +5,7 @@ import {
   type ProviderSession,
   type ProviderSessionInit,
   type ProviderTestResult,
+  type ProviderTokenUsage,
   type ProviderToolCall,
   type ProviderToolResultInput,
   type ProviderTurnResult,
@@ -126,21 +127,37 @@ export const openaiCompatibleProvider: ModelProvider = {
 
     return {
       async runTurn({ signal, onTextDelta }): Promise<ProviderTurnResult> {
-        const response = await fetch(endpoint, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${init.config.apiKey.trim()}`,
-          },
-          body: JSON.stringify({
-            model: init.config.model.trim(),
-            messages,
-            tools,
-            tool_choice: "auto",
-            stream: true,
-          }),
-          signal,
-        });
+        const doStreamFetch = (includeStreamOptions: boolean) =>
+          fetch(endpoint, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${init.config.apiKey.trim()}`,
+            },
+            body: JSON.stringify({
+              model: init.config.model.trim(),
+              messages,
+              tools,
+              tool_choice: "auto",
+              stream: true,
+              ...(includeStreamOptions
+                ? { stream_options: { include_usage: true } }
+                : {}),
+            }),
+            signal,
+          });
+
+        let response = await doStreamFetch(true);
+        if (!response.ok && response.status === 400) {
+          const detail = await parseJsonErrorMessage(response);
+          if (detail.toLowerCase().includes("stream_options")) {
+            response = await doStreamFetch(false);
+          } else {
+            throw new Error(
+              `模型接口返回错误 (HTTP ${response.status}): ${detail.slice(0, 400)}`
+            );
+          }
+        }
 
         if (!response.ok) {
           const detail = await parseJsonErrorMessage(response);
@@ -159,6 +176,7 @@ export const openaiCompatibleProvider: ModelProvider = {
         let content = "";
         let reasoning = "";
         const toolCallsMap = new Map<number, ProviderToolCall>();
+        let usage: ProviderTokenUsage | undefined;
 
         while (true) {
           const { value, done } = await reader.read();
@@ -189,6 +207,16 @@ export const openaiCompatibleProvider: ModelProvider = {
                   }>;
                 };
               }>;
+              usage?: {
+                prompt_tokens?: number;
+                prompt_tokens_details?: {
+                  cached_tokens?: number;
+                };
+                prompt_cache_hit_tokens?: number;
+                prompt_cache_miss_tokens?: number;
+                completion_tokens?: number;
+                total_tokens?: number;
+              };
               error?: { message?: string };
             };
 
@@ -200,6 +228,40 @@ export const openaiCompatibleProvider: ModelProvider = {
 
             if (chunk.error?.message) {
               throw new Error(`模型流式返回错误: ${chunk.error.message}`);
+            }
+
+            if (chunk.usage) {
+              const rawPrompt = Math.max(
+                0,
+                Number(chunk.usage.prompt_tokens) || 0
+              );
+              const rawCached = Math.max(
+                0,
+                Number(
+                  chunk.usage.prompt_tokens_details?.cached_tokens ??
+                    chunk.usage.prompt_cache_hit_tokens
+                ) || 0
+              );
+              const cachedInputTokens = Math.min(rawPrompt, rawCached);
+              const inputTokens =
+                typeof chunk.usage.prompt_cache_miss_tokens === "number"
+                  ? Math.max(0, chunk.usage.prompt_cache_miss_tokens)
+                  : Math.max(0, rawPrompt - cachedInputTokens);
+              const outputTokens = Math.max(
+                0,
+                Number(chunk.usage.completion_tokens) || 0
+              );
+              const totalTokens = Math.max(
+                inputTokens + cachedInputTokens + outputTokens,
+                Number(chunk.usage.total_tokens) || 0
+              );
+              usage = {
+                inputTokens,
+                cachedInputTokens,
+                cacheWriteTokens: 0,
+                outputTokens,
+                totalTokens,
+              };
             }
 
             const delta = chunk.choices?.[0]?.delta;
@@ -261,7 +323,7 @@ export const openaiCompatibleProvider: ModelProvider = {
         };
         messages.push(assistantMsg);
 
-        return { content, reasoning, toolCalls };
+        return { content, reasoning, toolCalls, usage };
       },
 
       appendToolResults(results: ProviderToolResultInput[]) {

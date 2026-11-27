@@ -5,6 +5,7 @@ import {
   type ProviderSession,
   type ProviderSessionInit,
   type ProviderTestResult,
+  type ProviderTokenUsage,
   type ProviderToolCall,
   type ProviderToolResultInput,
   type ProviderTurnResult,
@@ -173,6 +174,11 @@ export const anthropicNativeProvider: ModelProvider = {
         }
 
         const blocksByIndex = new Map<number, BlockAccumulator>();
+        let inputTokens = 0;
+        let cachedInputTokens = 0;
+        let cacheWriteTokens = 0;
+        let outputTokens = 0;
+        let hasUsage = false;
 
         while (true) {
           const { value, done } = await reader.read();
@@ -197,7 +203,66 @@ export const anthropicNativeProvider: ModelProvider = {
 
             const evtType = String(evt.type || "");
 
-            if (evtType === "content_block_start") {
+            if (evtType === "message_start") {
+              const msgUsage = (
+                evt.message as
+                  | {
+                      usage?: {
+                        input_tokens?: number;
+                        cache_creation_input_tokens?: number;
+                        cache_read_input_tokens?: number;
+                        output_tokens?: number;
+                      };
+                    }
+                  | undefined
+              )?.usage;
+              if (msgUsage) {
+                hasUsage = true;
+                inputTokens = Math.max(0, Number(msgUsage.input_tokens) || 0);
+                cacheWriteTokens = Math.max(
+                  0,
+                  Number(msgUsage.cache_creation_input_tokens) || 0
+                );
+                cachedInputTokens = Math.max(
+                  0,
+                  Number(msgUsage.cache_read_input_tokens) || 0
+                );
+                outputTokens = Math.max(
+                  outputTokens,
+                  Number(msgUsage.output_tokens) || 0
+                );
+              }
+            } else if (evtType === "message_delta") {
+              const deltaUsage = evt.usage as
+                | {
+                    input_tokens?: number;
+                    cache_creation_input_tokens?: number;
+                    cache_read_input_tokens?: number;
+                    output_tokens?: number;
+                  }
+                | undefined;
+              if (deltaUsage) {
+                hasUsage = true;
+                if (typeof deltaUsage.input_tokens === "number") {
+                  inputTokens = Math.max(inputTokens, deltaUsage.input_tokens);
+                }
+                if (typeof deltaUsage.cache_creation_input_tokens === "number") {
+                  cacheWriteTokens = Math.max(
+                    cacheWriteTokens,
+                    deltaUsage.cache_creation_input_tokens
+                  );
+                }
+                if (typeof deltaUsage.cache_read_input_tokens === "number") {
+                  cachedInputTokens = Math.max(
+                    cachedInputTokens,
+                    deltaUsage.cache_read_input_tokens
+                  );
+                }
+                if (typeof deltaUsage.output_tokens === "number") {
+                  outputTokens = Math.max(outputTokens, deltaUsage.output_tokens);
+                }
+              }
+            } else if (evtType === "content_block_start") {
               const index = Number(evt.index ?? 0);
               const cb = evt.content_block as
                 | {
@@ -304,7 +369,21 @@ export const anthropicNativeProvider: ModelProvider = {
           messages.push({ role: "assistant", content: assistantBlocks });
         }
 
-        return { content, reasoning, toolCalls };
+        const usage: ProviderTokenUsage | undefined = hasUsage
+          ? {
+              inputTokens: Math.max(0, inputTokens),
+              cachedInputTokens: Math.max(0, cachedInputTokens),
+              cacheWriteTokens: Math.max(0, cacheWriteTokens),
+              outputTokens: Math.max(0, outputTokens),
+              totalTokens:
+                Math.max(0, inputTokens) +
+                Math.max(0, cachedInputTokens) +
+                Math.max(0, cacheWriteTokens) +
+                Math.max(0, outputTokens),
+            }
+          : undefined;
+
+        return { content, reasoning, toolCalls, usage };
       },
 
       appendToolResults(results: ProviderToolResultInput[]) {

@@ -5,6 +5,7 @@ import {
   type ProviderSession,
   type ProviderSessionInit,
   type ProviderTestResult,
+  type ProviderTokenUsage,
   type ProviderToolCall,
   type ProviderToolResultInput,
   type ProviderTurnResult,
@@ -152,6 +153,7 @@ export const openaiResponsesProvider: ModelProvider = {
         const toolCallsByItemId = new Map<string, ProviderToolCall>();
         const toolCallOrder: string[] = [];
         let completedOutputItems: Array<Record<string, unknown>> | null = null;
+        let usage: ProviderTokenUsage | undefined;
 
         while (true) {
           const { value, done } = await reader.read();
@@ -247,11 +249,48 @@ export const openaiResponsesProvider: ModelProvider = {
               }
             } else if (evtType === "response.completed") {
               const resp = evt.response as
-                | { id?: string; output?: Array<Record<string, unknown>> }
+                | {
+                    id?: string;
+                    output?: Array<Record<string, unknown>>;
+                    usage?: {
+                      input_tokens?: number;
+                      input_tokens_details?: {
+                        cached_tokens?: number;
+                      };
+                      output_tokens?: number;
+                      total_tokens?: number;
+                    };
+                  }
                 | undefined;
               if (resp?.id) previousResponseId = resp.id;
               if (Array.isArray(resp?.output)) {
                 completedOutputItems = resp.output;
+              }
+              if (resp?.usage) {
+                const rawInput = Math.max(0, Number(resp.usage.input_tokens) || 0);
+                const cachedInputTokens = Math.min(
+                  rawInput,
+                  Math.max(
+                    0,
+                    Number(resp.usage.input_tokens_details?.cached_tokens) || 0
+                  )
+                );
+                const inputTokens = Math.max(0, rawInput - cachedInputTokens);
+                const outputTokens = Math.max(
+                  0,
+                  Number(resp.usage.output_tokens) || 0
+                );
+                const totalTokens = Math.max(
+                  rawInput + outputTokens,
+                  Number(resp.usage.total_tokens) || 0
+                );
+                usage = {
+                  inputTokens,
+                  cachedInputTokens,
+                  cacheWriteTokens: 0,
+                  outputTokens,
+                  totalTokens,
+                };
               }
             } else if (evtType === "response.failed" || evtType === "error") {
               const errObj = (evt.error ||
@@ -285,7 +324,7 @@ export const openaiResponsesProvider: ModelProvider = {
           }
         }
 
-        return { content, reasoning, toolCalls };
+        return { content, reasoning, toolCalls, usage };
       },
 
       appendToolResults(results: ProviderToolResultInput[]) {

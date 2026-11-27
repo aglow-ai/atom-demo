@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { AGENT_TOOLS, executeAgentTool } from "./agent-tools";
 import { compileProject, normalizeProjectFiles } from "./compiler";
+import { deductUserCredits } from "./credits";
 import {
   resolveModelProvider,
   type ProviderToolResultInput,
@@ -11,11 +12,14 @@ import {
   rowToProject,
   type SupabaseProjectRow,
 } from "./supabase-server";
+import { calculateCreditsFromTokens } from "./system-model";
 import { REACT_AGENT_SYSTEM_PROMPT } from "./system-prompt";
 import type {
   AgentStreamEvent,
   ChatMessage,
+  MessageUsageInfo,
   ModelConfig,
+  ModelConfigMode,
   Project,
   ProjectFiles,
   ReActStep,
@@ -35,6 +39,7 @@ export interface ActiveAgentJob {
   jobId: string;
   projectId: string;
   userId: string;
+  billingMode: ModelConfigMode;
   supabase: SupabaseClient;
   prompt: string;
   assistantMsgId: string;
@@ -307,6 +312,7 @@ export async function prepareBackgroundAgentJob(params: {
   supabase: SupabaseClient;
   backgroundSupabase: SupabaseClient;
   userId: string;
+  billingMode: ModelConfigMode;
   project: Project;
   prompt: string;
   config: ModelConfig;
@@ -400,6 +406,7 @@ export async function prepareBackgroundAgentJob(params: {
     jobId: `job_${now}_${Math.random().toString(36).slice(2, 7)}`,
     projectId: baseProject.id,
     userId: params.userId,
+    billingMode: params.billingMode,
     supabase: params.backgroundSupabase,
     prompt,
     assistantMsgId,
@@ -473,6 +480,76 @@ async function runJobLoop(
     });
   }, 1200);
 
+  let totalInputTokens = 0;
+  let totalCachedInputTokens = 0;
+  let totalCacheWriteTokens = 0;
+  let totalOutputTokens = 0;
+  let completedTurns = 0;
+
+  const workspaceContextChars =
+    REACT_AGENT_SYSTEM_PROMPT.length +
+    buildWorkspaceContextMessage(workingFiles).length +
+    job.prompt.length;
+
+  const settleBilling = async (): Promise<MessageUsageInfo | undefined> => {
+    const totalTokens =
+      totalInputTokens +
+      totalCachedInputTokens +
+      totalCacheWriteTokens +
+      totalOutputTokens;
+
+    if (completedTurns === 0 && totalTokens === 0) {
+      return undefined;
+    }
+
+    if (job.billingMode !== "system") {
+      return {
+        billingMode: "custom",
+        model: config.model,
+        inputTokens: totalInputTokens,
+        cachedInputTokens: totalCachedInputTokens,
+        cacheWriteTokens: totalCacheWriteTokens,
+        outputTokens: totalOutputTokens,
+        totalTokens,
+        creditsCharged: 0,
+      };
+    }
+
+    const creditsToCharge = calculateCreditsFromTokens({
+      inputTokens: totalInputTokens,
+      cachedInputTokens: totalCachedInputTokens,
+      cacheWriteTokens: totalCacheWriteTokens,
+      outputTokens: totalOutputTokens,
+    });
+
+    const deducted =
+      creditsToCharge > 0
+        ? await deductUserCredits(job.supabase, {
+            userId: job.userId,
+            amount: creditsToCharge,
+            projectId: job.projectId,
+            jobId: job.jobId,
+            model: config.model,
+            inputTokens: totalInputTokens,
+            cachedInputTokens: totalCachedInputTokens,
+            cacheWriteTokens: totalCacheWriteTokens,
+            outputTokens: totalOutputTokens,
+          })
+        : null;
+
+    return {
+      billingMode: "system",
+      model: config.model,
+      inputTokens: totalInputTokens,
+      cachedInputTokens: totalCachedInputTokens,
+      cacheWriteTokens: totalCacheWriteTokens,
+      outputTokens: totalOutputTokens,
+      totalTokens,
+      creditsCharged: deducted ? deducted.charged : creditsToCharge,
+      balanceAfter: deducted?.balance,
+    };
+  };
+
   try {
     let finalSummary = "";
     let lastValidationPassed = false;
@@ -522,10 +599,40 @@ async function runJobLoop(
         scheduleDeltaPersist();
       };
 
-      const { content, reasoning, toolCalls } = await session.runTurn({
+      const { content, reasoning, toolCalls, usage } = await session.runTurn({
         signal,
         onTextDelta,
       });
+
+      completedTurns += 1;
+      if (
+        usage &&
+        (usage.inputTokens > 0 ||
+          usage.cachedInputTokens > 0 ||
+          usage.cacheWriteTokens > 0 ||
+          usage.outputTokens > 0)
+      ) {
+        totalInputTokens += usage.inputTokens;
+        totalCachedInputTokens += usage.cachedInputTokens;
+        totalCacheWriteTokens += usage.cacheWriteTokens;
+        totalOutputTokens += usage.outputTokens;
+      } else {
+        // Conservative fallback estimation when an upstream proxy omits streaming usage
+        const toolArgsChars = toolCalls.reduce(
+          (sum, tc) => sum + tc.name.length + tc.argumentsStr.length,
+          0
+        );
+        const estimatedOut = Math.max(
+          1,
+          Math.ceil((content.length + reasoning.length + toolArgsChars) / 4)
+        );
+        const estimatedIn = Math.max(
+          1,
+          Math.ceil((workspaceContextChars + iteration * 1200) / 4)
+        );
+        totalInputTokens += estimatedIn;
+        totalOutputTokens += estimatedOut;
+      }
 
       const combinedThought = [reasoning, content]
         .filter(Boolean)
@@ -802,6 +909,8 @@ async function runJobLoop(
         ]
       : job.projectState.snapshots;
 
+    const usageInfo = await settleBilling();
+
     job.projectState = {
       ...job.projectState,
       files: { ...workingFiles },
@@ -829,6 +938,7 @@ async function runJobLoop(
           steps: cleanedSteps,
           filesChanged: changedFiles,
           snapshotId: snapId,
+          usage: usageInfo,
           status: "done",
         };
       }),
@@ -846,6 +956,7 @@ async function runJobLoop(
       changedFiles,
       iterations: completedIterations,
       snapshotId: snapId,
+      usage: usageInfo,
       project: cloneProject(job.projectState),
     });
   } catch (err) {
@@ -861,10 +972,13 @@ async function runJobLoop(
     job.status = terminalStatus;
     job.finishedAt = Date.now();
 
+    const usageInfo = await settleBilling();
+
     patchAssistantMessage(job, (m) => ({
       ...m,
       status: terminalStatus,
       error: errMsg,
+      usage: usageInfo,
       steps: (m.steps ?? []).map((s) =>
         s.status === "running" ? { ...s, status: "error" } : s
       ),

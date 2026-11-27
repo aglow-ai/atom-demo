@@ -6,6 +6,7 @@
 
 - **清晰的三页路由架构（`/` + `/projects` + `/project/[id]`）**：首页 `/` 专注一句话发起应用构建与示例模板；`/projects` 为独立的「我的项目」管理页（搜索、新建、删除）；`/project/[id]` 为分栏智能体工作台。
 - **Supabase Auth (Google 登录) 与用户数据隔离**：基于 `@supabase/ssr` 实现标准 PKCE Google OAuth 登录与会话续期；未登录用户可浏览首页，创建或访问项目时引导 Google 登录，并通过 `atoms_projects.user_id` 与 PostgreSQL RLS 策略实现个人项目严格隔离。
+- **系统默认 AI 模型与 Token 积分计费**：支持在服务端环境变量中配置系统默认模型（API Key 不暴露给浏览器），新注册用户自动赠送 **100 积分**；用户未自定义模型时自动使用系统默认模型，并按实际消耗的 Input/Output Tokens 折算扣费（至少扣 1 积分）；用户配置自定义 API Key 时则完全不消耗平台积分。
 - **后台 Supabase 数据库持久化**：所有项目元数据、生成的多文件代码、对话记录、ReAct 轨迹与版本快照通过 Next.js 后端 API 持久化至 Supabase `atoms_projects` 表。
 - **单智能体 ReAct 循环**：通过多模型原生接口（OpenAI / Gemini / Anthropic / DeepSeek / OpenRouter）与 SSE 流式输出，自主完成「思考 → 读/写/编辑多文件 → 静态编译校验 → 自修复」闭环，并在左侧聊天流中实时可视化每一步执行轨迹。
 - **浏览器内多文件 React + Tailwind 即时编译与隔离预览**：支持多文件 TSX/TS/CSS 相互导入与常用生态库（`lucide-react`、`recharts`、`framer-motion` 等），在受限 `iframe` 沙箱中零延迟渲染，支持桌面/平板/手机视口切换、只读语法高亮代码查阅、运行时报错一键自动修复及独立 HTML / Vite ZIP 导出。
@@ -25,9 +26,22 @@ NEXT_PUBLIC_SUPABASE_URL=https://your-project-ref.supabase.co
 NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_your-key
 # 可选
 # SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+
+# 系统默认 AI 模型（仅存服务端）
+SYSTEM_MODEL_PROVIDER=openai
+SYSTEM_MODEL_BASE_URL=https://api.openai.com/v1
+SYSTEM_MODEL_API_KEY=sk-your-system-api-key
+SYSTEM_MODEL_NAME=gpt-6.2-sol
+
+# 可选：积分折算费率（新注册用户自动赠送 100 积分，含 Prompt Cache 折扣费率）
+# SYSTEM_MODEL_TOKENS_PER_CREDIT_INPUT=4000
+# SYSTEM_MODEL_TOKENS_PER_CREDIT_CACHED_INPUT=40000
+# SYSTEM_MODEL_TOKENS_PER_CREDIT_CACHE_WRITE=3200
+# SYSTEM_MODEL_TOKENS_PER_CREDIT_OUTPUT=1000
+# SYSTEM_MODEL_MIN_CREDITS_PER_RUN=1
 ```
 
-### 2. 推送数据库迁移（含 `user_id` 与 RLS 策略）
+### 2. 推送数据库迁移（含 `user_id`、RLS 与积分计费表）
 
 使用 Supabase CLI 推送迁移脚本（或直接在 Supabase SQL Editor 执行 [schema.sql](./supabase/schema.sql)）：
 

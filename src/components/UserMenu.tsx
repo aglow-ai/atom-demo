@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { ChevronDown, FolderKanban, Loader2, LogOut } from "lucide-react";
 import { useAuth } from "./AuthProvider";
+import { CreditsBadge } from "./CreditsBadge";
 import { GoogleIcon } from "./GoogleIcon";
 
 export function UserMenu() {
@@ -82,7 +83,9 @@ export function UserMenu() {
   const initial = displayName.trim().charAt(0).toUpperCase() || "U";
 
   return (
-    <div ref={menuRef} className="relative">
+    <div className="flex items-center gap-2">
+      <CreditsBadge />
+      <div ref={menuRef} className="relative">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -146,6 +149,7 @@ export function UserMenu() {
           </button>
         </div>
       )}
+      </div>
     </div>
   );
 }

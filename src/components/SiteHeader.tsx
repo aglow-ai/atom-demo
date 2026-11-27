@@ -9,7 +9,12 @@ import {
   Settings,
   Sun,
 } from "lucide-react";
-import type { ModelConfig } from "@/lib/types";
+import {
+  getResolvedModelMode,
+  isEffectiveModelReady,
+  type ModelConfig,
+} from "@/lib/types";
+import { useBilling } from "./BillingProvider";
 import { UserMenu } from "./UserMenu";
 
 interface SiteHeaderProps {
@@ -29,11 +34,17 @@ export function SiteHeader({
   onToggleTheme,
   onOpenSettings,
 }: SiteHeaderProps) {
-  const isModelConfigured = Boolean(
-    modelConfig.apiKey.trim() &&
-      modelConfig.baseUrl.trim() &&
-      modelConfig.model.trim()
-  );
+  const { systemModel } = useBilling();
+  const mode = getResolvedModelMode(modelConfig);
+  const isModelConfigured = isEffectiveModelReady(modelConfig, systemModel);
+  const modelButtonLabel =
+    mode === "system"
+      ? systemModel.available
+        ? `系统 · ${systemModel.model}`
+        : "模型设置"
+      : isModelConfigured
+        ? modelConfig.model
+        : "模型设置";
 
   return (
     <header className="sticky top-0 z-30 h-14 border-b border-zinc-200/80 dark:border-zinc-800/80 bg-white/80 dark:bg-[#09090b]/80 backdrop-blur-md">
@@ -102,8 +113,8 @@ export function SiteHeader({
               }`}
             />
             <Settings className="h-3.5 w-3.5" />
-            <span className="max-w-[130px] truncate font-mono text-[11px]">
-              {isModelConfigured ? modelConfig.model : "模型设置"}
+            <span className="max-w-[140px] truncate font-mono text-[11px]">
+              {modelButtonLabel}
             </span>
           </button>
 

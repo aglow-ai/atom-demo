@@ -16,12 +16,67 @@ export interface ModelPreset {
   docsHint: string;
 }
 
+export type ModelConfigMode = "system" | "custom";
+
 export interface ModelConfig {
+  mode?: ModelConfigMode;
   provider: ModelProviderId;
   baseUrl: string;
   apiKey: string;
   model: string;
   maxIterations: number;
+}
+
+export interface SystemModelPublicInfo {
+  available: boolean;
+  provider: ModelProviderId;
+  model: string;
+  maxIterations: number;
+  inputTokensPerCredit: number;
+  cachedInputTokensPerCredit: number;
+  cacheWriteTokensPerCredit: number;
+  outputTokensPerCredit: number;
+  minCreditsPerRun: number;
+  initialCredits: number;
+}
+
+export interface UserCreditsInfo {
+  balance: number;
+  totalGranted: number;
+  totalSpent: number;
+}
+
+export interface CreditTransactionItem {
+  id: string;
+  delta: number;
+  balanceAfter: number;
+  reason: string;
+  projectId: string | null;
+  jobId: string | null;
+  model: string | null;
+  inputTokens: number;
+  cachedInputTokens: number;
+  cacheWriteTokens: number;
+  outputTokens: number;
+  createdAt: number;
+}
+
+export interface BillingSnapshot {
+  systemModel: SystemModelPublicInfo;
+  credits: UserCreditsInfo | null;
+  recentTransactions: CreditTransactionItem[];
+}
+
+export interface MessageUsageInfo {
+  billingMode: ModelConfigMode;
+  model: string;
+  inputTokens: number;
+  cachedInputTokens?: number;
+  cacheWriteTokens?: number;
+  outputTokens: number;
+  totalTokens: number;
+  creditsCharged: number;
+  balanceAfter?: number;
 }
 
 export type ProjectFiles = Record<string, string>;
@@ -49,6 +104,7 @@ export interface ChatMessage {
   snapshotId?: string;
   status?: "streaming" | "done" | "error" | "aborted";
   error?: string;
+  usage?: MessageUsageInfo;
   createdAt: number;
 }
 
@@ -154,6 +210,7 @@ export type AgentStreamEvent =
       changedFiles: string[];
       iterations: number;
       snapshotId?: string;
+      usage?: MessageUsageInfo;
       project?: Project;
     }
   | { type: "error"; message: string; aborted?: boolean };
@@ -237,9 +294,33 @@ export const MODEL_PRESETS: ModelPreset[] = [
 ];
 
 export const DEFAULT_MODEL_CONFIG: ModelConfig = {
+  mode: "system",
   provider: "openai",
   baseUrl: "https://api.openai.com/v1",
   apiKey: "",
   model: "gpt-6.2-sol",
   maxIterations: 12,
 };
+
+export function isCustomModelConfigured(config: ModelConfig): boolean {
+  return Boolean(
+    config.apiKey.trim() && config.baseUrl.trim() && config.model.trim()
+  );
+}
+
+export function getResolvedModelMode(config: ModelConfig): ModelConfigMode {
+  if (config.mode === "custom") return "custom";
+  if (config.mode === "system") return "system";
+  return isCustomModelConfigured(config) ? "custom" : "system";
+}
+
+export function isEffectiveModelReady(
+  config: ModelConfig,
+  systemModel?: SystemModelPublicInfo | null
+): boolean {
+  const mode = getResolvedModelMode(config);
+  if (mode === "custom") {
+    return isCustomModelConfigured(config);
+  }
+  return Boolean(systemModel?.available);
+}

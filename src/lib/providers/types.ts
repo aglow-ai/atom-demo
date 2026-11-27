@@ -16,10 +16,23 @@ export interface ProviderToolCall {
   argumentsStr: string;
 }
 
+export interface ProviderTokenUsage {
+  /** Non-cached regular input tokens */
+  inputTokens: number;
+  /** Prompt cache hit (read) input tokens */
+  cachedInputTokens: number;
+  /** Prompt cache creation (write) input tokens */
+  cacheWriteTokens: number;
+  /** Output tokens (including reasoning/thoughts) */
+  outputTokens: number;
+  totalTokens: number;
+}
+
 export interface ProviderTurnResult {
   content: string;
   reasoning: string;
   toolCalls: ProviderToolCall[];
+  usage?: ProviderTokenUsage;
 }
 
 export interface ProviderToolResultInput {

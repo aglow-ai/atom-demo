@@ -19,10 +19,14 @@ export function loadModelConfig(): ModelConfig {
     const raw = window.localStorage.getItem(CONFIG_KEY);
     if (!raw) return { ...DEFAULT_MODEL_CONFIG };
     const parsed = JSON.parse(raw) as Partial<ModelConfig>;
-    return {
+    const merged: ModelConfig = {
       ...DEFAULT_MODEL_CONFIG,
       ...parsed,
     };
+    if (parsed.mode !== "system" && parsed.mode !== "custom") {
+      merged.mode = merged.apiKey.trim() ? "custom" : "system";
+    }
+    return merged;
   } catch {
     return { ...DEFAULT_MODEL_CONFIG };
   }

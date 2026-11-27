@@ -19,12 +19,15 @@ import {
 } from "@/lib/storage";
 import {
   DEFAULT_MODEL_CONFIG,
+  getResolvedModelMode,
+  isEffectiveModelReady,
   type AgentStreamEvent,
   type ChatMessage,
   type ModelConfig,
   type Project,
   type ReActStep,
 } from "@/lib/types";
+import { useBilling } from "./BillingProvider";
 import { ChatPanel } from "./ChatPanel";
 import { CodePane } from "./CodePane";
 import { PreviewPane } from "./PreviewPane";
@@ -37,6 +40,7 @@ interface AtomsWorkbenchProps {
 
 export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
   const router = useRouter();
+  const { systemModel, credits, refreshBilling } = useBilling();
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [theme, setTheme] = useState<"dark" | "light">("dark");
@@ -151,6 +155,9 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
             case "job_snapshot": {
               setProjectAndRef(event.project);
               const stillActive = event.status === "running";
+              if (lastKnownRunning && !stillActive) {
+                void refreshBilling();
+              }
               lastKnownRunning = stillActive;
               setIsRunning(stillActive);
               if (
@@ -287,6 +294,7 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
                 setProjectAndRef(event.project);
               }
               setIsRunning(false);
+              void refreshBilling();
               if (
                 event.changedFiles.length > 0 &&
                 Object.keys(event.files).length > 0
@@ -307,6 +315,7 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
                 ),
               }));
               setIsRunning(false);
+              void refreshBilling();
               break;
             }
           }
@@ -354,7 +363,7 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
         }
       }
     },
-    [router, setProjectAndRef]
+    [refreshBilling, router, setProjectAndRef]
   );
 
   // Load project + auto-reattach to any running background job on mount/refresh
@@ -431,7 +440,12 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
   const handleSaveModelConfig = (next: ModelConfig) => {
     setModelConfig(next);
     saveModelConfig(next);
-    showToast(`已保存模型配置：${next.model}`);
+    const mode = getResolvedModelMode(next);
+    showToast(
+      mode === "system"
+        ? `已切换为系统默认模型${systemModel.available ? `：${systemModel.model}` : ""}`
+        : `已保存自定义模型：${next.model}`
+    );
   };
 
   const handleRenameProject = async (name: string) => {
@@ -531,11 +545,20 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
       const cfg = overrideConfig ?? modelConfig;
       if (!curProject || isRunning) return;
 
-      const isConfigured = Boolean(
-        cfg.apiKey.trim() && cfg.baseUrl.trim() && cfg.model.trim()
-      );
+      const cfgMode = getResolvedModelMode(cfg);
+      const isConfigured = isEffectiveModelReady(cfg, systemModel);
       if (!isConfigured) {
         setSettingsOpen(true);
+        return;
+      }
+
+      if (
+        cfgMode === "system" &&
+        credits &&
+        credits.balance < systemModel.minCreditsPerRun
+      ) {
+        setSettingsOpen(true);
+        showToast("积分不足，请切换为自定义 API Key 继续使用");
         return;
       }
 
@@ -606,6 +629,10 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
               : p
           );
           setIsRunning(false);
+          if (res.status === 402 || data.code === "INSUFFICIENT_CREDITS") {
+            void refreshBilling();
+            setSettingsOpen(true);
+          }
           showToast(errMsg);
           return;
         }
@@ -633,7 +660,17 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
         showToast(errMsg);
       }
     },
-    [attachToJobStream, isRunning, modelConfig, router, setProjectAndRef, showToast]
+    [
+      attachToJobStream,
+      credits,
+      isRunning,
+      modelConfig,
+      refreshBilling,
+      router,
+      setProjectAndRef,
+      showToast,
+      systemModel,
+    ]
   );
 
   // Auto-run pending prompt passed from the Home Page
@@ -680,11 +717,7 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
     );
   }
 
-  const isConfigured = Boolean(
-    modelConfig.apiKey.trim() &&
-      modelConfig.baseUrl.trim() &&
-      modelConfig.model.trim()
-  );
+  const isConfigured = isEffectiveModelReady(modelConfig, systemModel);
   const viewingSnapIndex = viewingSnapshotId
     ? project.snapshots.findIndex((s) => s.id === viewingSnapshotId)
     : -1;

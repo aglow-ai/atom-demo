@@ -5,6 +5,7 @@ import {
   type ProviderSession,
   type ProviderSessionInit,
   type ProviderTestResult,
+  type ProviderTokenUsage,
   type ProviderToolCall,
   type ProviderToolResultInput,
   type ProviderTurnResult,
@@ -185,6 +186,7 @@ export const geminiNativeProvider: ModelProvider = {
         const toolCalls: ProviderToolCall[] = [];
         // Preserve raw model parts (including thoughtSignature!) for multi-turn Gemini 3/4 tool calls
         const preservedModelParts: GeminiPart[] = [];
+        let usage: ProviderTokenUsage | undefined;
 
         while (true) {
           const { value, done } = await reader.read();
@@ -202,6 +204,13 @@ export const geminiNativeProvider: ModelProvider = {
 
             let chunk: {
               candidates?: Array<{ content?: { parts?: GeminiPart[] } }>;
+              usageMetadata?: {
+                promptTokenCount?: number;
+                cachedContentTokenCount?: number;
+                candidatesTokenCount?: number;
+                thoughtsTokenCount?: number;
+                totalTokenCount?: number;
+              };
               error?: { message?: string };
             };
             try {
@@ -212,6 +221,37 @@ export const geminiNativeProvider: ModelProvider = {
 
             if (chunk.error?.message) {
               throw new Error(`模型流式返回错误: ${chunk.error.message}`);
+            }
+
+            if (chunk.usageMetadata) {
+              const rawInput = Math.max(
+                0,
+                Number(chunk.usageMetadata.promptTokenCount) || 0
+              );
+              const cachedInputTokens = Math.min(
+                rawInput,
+                Math.max(
+                  0,
+                  Number(chunk.usageMetadata.cachedContentTokenCount) || 0
+                )
+              );
+              const inputTokens = Math.max(0, rawInput - cachedInputTokens);
+              const rawOutput =
+                (Number(chunk.usageMetadata.candidatesTokenCount) || 0) +
+                (Number(chunk.usageMetadata.thoughtsTokenCount) || 0);
+              const totalCount = Number(chunk.usageMetadata.totalTokenCount) || 0;
+              const outputTokens = Math.max(
+                0,
+                rawOutput,
+                totalCount > rawInput ? totalCount - rawInput : 0
+              );
+              usage = {
+                inputTokens,
+                cachedInputTokens,
+                cacheWriteTokens: 0,
+                outputTokens,
+                totalTokens: Math.max(totalCount, rawInput + outputTokens),
+              };
             }
 
             const parts = chunk.candidates?.[0]?.content?.parts;
@@ -261,7 +301,7 @@ export const geminiNativeProvider: ModelProvider = {
           contents.push({ role: "model", parts: preservedModelParts });
         }
 
-        return { content, reasoning, toolCalls };
+        return { content, reasoning, toolCalls, usage };
       },
 
       appendToolResults(results: ProviderToolResultInput[]) {
