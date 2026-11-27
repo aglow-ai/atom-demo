@@ -1,11 +1,7 @@
-import {
-  createEmptyProject,
-  loadProjects as loadLocalProjects,
-  saveProjects as saveLocalProjects,
-} from "./storage";
 import type { Project, ProjectSummary, SupabaseStatusInfo } from "./types";
 
 const PENDING_PROMPT_PREFIX = "atoms_pending_prompt_";
+const PENDING_HOME_PROMPT_KEY = "atoms_pending_home_prompt_v1";
 
 export function toProjectSummary(project: Project): ProjectSummary {
   const fileNames = Object.keys(project.files || {}).sort();
@@ -40,47 +36,48 @@ export async function fetchSupabaseStatus(): Promise<SupabaseStatusInfo> {
       configured: false,
       connected: false,
       tableReady: false,
-      storageMode: "local",
+      storageMode: "supabase",
       error: err instanceof Error ? err.message : "状态检查失败",
     };
   }
 }
 
 export async function listProjects(): Promise<{
-  storageMode: "supabase" | "local";
   projects: ProjectSummary[];
+  unauthorized?: boolean;
   error?: string;
 }> {
   try {
     const res = await fetch("/api/projects", { cache: "no-store" });
-    const data = await res.json();
-    if (res.ok && data.storage === "supabase") {
+    if (res.status === 401) {
+      return { projects: [], unauthorized: true };
+    }
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && Array.isArray(data.projects)) {
       return {
-        storageMode: "supabase",
         projects: data.projects as ProjectSummary[],
       };
     }
-    // Fallback to localStorage when Supabase is unconfigured or table not yet created
-    const local = loadLocalProjects()
-      .sort((a, b) => b.updatedAt - a.updatedAt)
-      .map(toProjectSummary);
     return {
-      storageMode: "local",
-      projects: local,
-      error: data.storage === "error" ? data.error : undefined,
+      projects: [],
+      error: data.error || `加载项目失败 (HTTP ${res.status})`,
     };
-  } catch {
-    const local = loadLocalProjects()
-      .sort((a, b) => b.updatedAt - a.updatedAt)
-      .map(toProjectSummary);
-    return { storageMode: "local", projects: local };
+  } catch (err) {
+    return {
+      projects: [],
+      error: err instanceof Error ? err.message : "网络异常，无法加载项目列表",
+    };
   }
 }
 
 export async function createProject(params?: {
   name?: string;
   description?: string;
-}): Promise<{ project: Project; storageMode: "supabase" | "local" }> {
+}): Promise<{
+  project: Project | null;
+  unauthorized?: boolean;
+  error?: string;
+}> {
   const name = params?.name?.trim() || "未命名应用";
   const description = params?.description?.trim() || "";
 
@@ -90,66 +87,58 @@ export async function createProject(params?: {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, description }),
     });
-    if (res.ok) {
-      const data = await res.json();
-      if (data.project) {
-        return { project: data.project as Project, storageMode: "supabase" };
-      }
+    if (res.status === 401) {
+      return { project: null, unauthorized: true };
     }
-  } catch {
-    // fallback to local
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.project) {
+      return { project: data.project as Project };
+    }
+    return {
+      project: null,
+      error: data.error || `创建项目失败 (HTTP ${res.status})`,
+    };
+  } catch (err) {
+    return {
+      project: null,
+      error: err instanceof Error ? err.message : "网络异常，创建项目失败",
+    };
   }
-
-  const localProj = createEmptyProject(name);
-  localProj.description = description;
-  const all = loadLocalProjects();
-  saveLocalProjects([localProj, ...all]);
-  return { project: localProj, storageMode: "local" };
 }
 
 export async function getProjectById(id: string): Promise<{
   project: Project | null;
-  storageMode: "supabase" | "local";
+  unauthorized?: boolean;
+  error?: string;
 }> {
   try {
     const res = await fetch(`/api/projects/${encodeURIComponent(id)}`, {
       cache: "no-store",
     });
-    if (res.ok) {
-      const data = await res.json();
-      if (data.project) {
-        return { project: data.project as Project, storageMode: "supabase" };
-      }
+    if (res.status === 401) {
+      return { project: null, unauthorized: true };
     }
-    if (res.status === 404) {
-      // Check local storage just in case it was created before configuring Supabase
-      const localMatch = loadLocalProjects().find((p) => p.id === id) ?? null;
-      return {
-        project: localMatch,
-        storageMode: localMatch ? "local" : "supabase",
-      };
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.project) {
+      return { project: data.project as Project };
     }
-  } catch {
-    // fallback to local
+    return {
+      project: null,
+      error: data.error || `加载项目失败 (HTTP ${res.status})`,
+    };
+  } catch (err) {
+    return {
+      project: null,
+      error: err instanceof Error ? err.message : "网络异常，加载项目失败",
+    };
   }
-
-  const localMatch = loadLocalProjects().find((p) => p.id === id) ?? null;
-  return { project: localMatch, storageMode: "local" };
 }
 
 export async function saveProject(project: Project): Promise<{
-  storageMode: "supabase" | "local";
   ok: boolean;
+  unauthorized?: boolean;
   error?: string;
 }> {
-  // Always keep a local mirror in case user reloads offline
-  const allLocal = loadLocalProjects();
-  const existsLocal = allLocal.some((p) => p.id === project.id);
-  const nextLocal = existsLocal
-    ? allLocal.map((p) => (p.id === project.id ? project : p))
-    : [project, ...allLocal];
-  saveLocalProjects(nextLocal);
-
   try {
     const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}`, {
       method: "PATCH",
@@ -162,21 +151,19 @@ export async function saveProject(project: Project): Promise<{
         snapshots: project.snapshots,
       }),
     });
-    if (res.ok) {
-      return { storageMode: "supabase", ok: true };
+    if (res.status === 401) {
+      return { ok: false, unauthorized: true };
     }
-    if (res.status === 503) {
-      return { storageMode: "local", ok: true };
+    if (res.ok) {
+      return { ok: true };
     }
     const data = await res.json().catch(() => ({}));
     return {
-      storageMode: "local",
       ok: false,
       error: data.error || `HTTP ${res.status}`,
     };
   } catch (err) {
     return {
-      storageMode: "local",
       ok: false,
       error: err instanceof Error ? err.message : "网络异常",
     };
@@ -186,47 +173,52 @@ export async function saveProject(project: Project): Promise<{
 export async function renameProjectById(
   id: string,
   name: string
-): Promise<{ storageMode: "supabase" | "local"; ok: boolean }> {
-  const allLocal = loadLocalProjects();
-  saveLocalProjects(
-    allLocal.map((p) =>
-      p.id === id ? { ...p, name, updatedAt: Date.now() } : p
-    )
-  );
-
+): Promise<{ ok: boolean; unauthorized?: boolean; error?: string }> {
   try {
     const res = await fetch(`/api/projects/${encodeURIComponent(id)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
     });
-    if (res.ok) {
-      return { storageMode: "supabase", ok: true };
+    if (res.status === 401) {
+      return { ok: false, unauthorized: true };
     }
-  } catch {
-    // ignore
+    if (res.ok) {
+      return { ok: true };
+    }
+    const data = await res.json().catch(() => ({}));
+    return { ok: false, error: data.error || `HTTP ${res.status}` };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "网络异常",
+    };
   }
-  return { storageMode: "local", ok: true };
 }
 
 export async function deleteProjectById(id: string): Promise<{
-  storageMode: "supabase" | "local";
   ok: boolean;
+  unauthorized?: boolean;
+  error?: string;
 }> {
-  const remainingLocal = loadLocalProjects().filter((p) => p.id !== id);
-  saveLocalProjects(remainingLocal);
-
   try {
     const res = await fetch(`/api/projects/${encodeURIComponent(id)}`, {
       method: "DELETE",
     });
-    if (res.ok) {
-      return { storageMode: "supabase", ok: true };
+    if (res.status === 401) {
+      return { ok: false, unauthorized: true };
     }
-  } catch {
-    // ignore
+    if (res.ok) {
+      return { ok: true };
+    }
+    const data = await res.json().catch(() => ({}));
+    return { ok: false, error: data.error || `HTTP ${res.status}` };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "网络异常",
+    };
   }
-  return { storageMode: "local", ok: true };
 }
 
 export function setPendingPrompt(projectId: string, prompt: string): void {
@@ -245,6 +237,28 @@ export function consumePendingPrompt(projectId: string): string | null {
     const value = window.sessionStorage.getItem(key);
     if (value) {
       window.sessionStorage.removeItem(key);
+    }
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+export function setPendingHomePrompt(prompt: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(PENDING_HOME_PROMPT_KEY, prompt);
+  } catch {
+    // ignore
+  }
+}
+
+export function consumePendingHomePrompt(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const value = window.sessionStorage.getItem(PENDING_HOME_PROMPT_KEY);
+    if (value) {
+      window.sessionStorage.removeItem(PENDING_HOME_PROMPT_KEY);
     }
     return value;
   } catch {

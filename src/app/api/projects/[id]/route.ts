@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getAuthenticatedServerContext } from "@/lib/supabase/server";
 import {
-  getSupabaseServerClient,
   PROJECTS_TABLE,
   rowToProject,
   type SupabaseProjectRow,
@@ -14,26 +14,28 @@ export async function GET(
   _req: NextRequest,
   context: { params: Promise<{ id: string }> }
 ) {
-  const supabase = getSupabaseServerClient();
-  if (!supabase) {
+  const auth = await getAuthenticatedServerContext();
+  if (!auth) {
     return NextResponse.json(
-      { storage: "unconfigured", error: "Supabase 尚未配置" },
-      { status: 503 }
+      { error: "请先使用 Google 账号登录" },
+      { status: 401 }
     );
   }
 
+  const { supabase, user } = auth;
   const { id } = await context.params;
   const { data, error } = await supabase
     .from(PROJECTS_TABLE)
     .select("*")
     .eq("id", id)
+    .eq("user_id", user.id)
     .maybeSingle();
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
   if (!data) {
-    return NextResponse.json({ error: "项目不存在" }, { status: 404 });
+    return NextResponse.json({ error: "项目不存在或无权访问" }, { status: 404 });
   }
 
   return NextResponse.json({
@@ -46,14 +48,15 @@ export async function PATCH(
   req: NextRequest,
   context: { params: Promise<{ id: string }> }
 ) {
-  const supabase = getSupabaseServerClient();
-  if (!supabase) {
+  const auth = await getAuthenticatedServerContext();
+  if (!auth) {
     return NextResponse.json(
-      { storage: "unconfigured", error: "Supabase 尚未配置" },
-      { status: 503 }
+      { error: "请先使用 Google 账号登录" },
+      { status: 401 }
     );
   }
 
+  const { supabase, user } = auth;
   const { id } = await context.params;
 
   try {
@@ -82,40 +85,25 @@ export async function PATCH(
       updatePayload.snapshots = body.snapshots;
     }
 
-    const isFullSync =
-      body.files !== undefined &&
-      Array.isArray(body.messages) &&
-      Array.isArray(body.snapshots);
-
-    const { data, error } = isFullSync
-      ? await supabase
-          .from(PROJECTS_TABLE)
-          .upsert(
-            {
-              id,
-              name: typeof body.name === "string" ? body.name : "未命名应用",
-              description:
-                typeof body.description === "string" ? body.description : "",
-              files: body.files,
-              messages: body.messages,
-              snapshots: body.snapshots,
-              updated_at: updatePayload.updated_at,
-            },
-            { onConflict: "id" }
-          )
-          .select()
-          .single()
-      : await supabase
-          .from(PROJECTS_TABLE)
-          .update(updatePayload)
-          .eq("id", id)
-          .select()
-          .single();
+    const { data, error } = await supabase
+      .from(PROJECTS_TABLE)
+      .update(updatePayload)
+      .eq("id", id)
+      .eq("user_id", user.id)
+      .select()
+      .maybeSingle();
 
     if (error) {
       return NextResponse.json(
         { error: `保存项目失败: ${error.message}` },
         { status: 500 }
+      );
+    }
+
+    if (!data) {
+      return NextResponse.json(
+        { error: "项目不存在或无权修改" },
+        { status: 404 }
       );
     }
 
@@ -135,19 +123,21 @@ export async function DELETE(
   _req: NextRequest,
   context: { params: Promise<{ id: string }> }
 ) {
-  const supabase = getSupabaseServerClient();
-  if (!supabase) {
+  const auth = await getAuthenticatedServerContext();
+  if (!auth) {
     return NextResponse.json(
-      { storage: "unconfigured", error: "Supabase 尚未配置" },
-      { status: 503 }
+      { error: "请先使用 Google 账号登录" },
+      { status: 401 }
     );
   }
 
+  const { supabase, user } = auth;
   const { id } = await context.params;
   const { error } = await supabase
     .from(PROJECTS_TABLE)
     .delete()
-    .eq("id", id);
+    .eq("id", id)
+    .eq("user_id", user.id);
 
   if (error) {
     return NextResponse.json(

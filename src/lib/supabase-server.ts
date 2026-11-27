@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { getServerSupabaseEnv } from "./supabase/env";
 import type {
   ChatMessage,
   Project,
@@ -11,6 +12,7 @@ export const PROJECTS_TABLE = "atoms_projects";
 
 export interface SupabaseProjectRow {
   id: string;
+  user_id?: string | null;
   name: string;
   description: string | null;
   files: ProjectFiles | null;
@@ -24,21 +26,8 @@ export interface SupabaseProjectRow {
 }
 
 function getSupabaseEnv() {
-  const url = (
-    process.env.SUPABASE_URL ||
-    process.env.NEXT_PUBLIC_SUPABASE_URL ||
-    ""
-  ).trim();
-  const key = (
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||
-    process.env.SUPABASE_PUBLISHABLE_KEY ||
-    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
-    process.env.SUPABASE_ANON_KEY ||
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-    ""
-  ).trim();
-
-  return { url, key };
+  const { url, publishableKey, serviceRoleKey } = getServerSupabaseEnv();
+  return { url, key: serviceRoleKey || publishableKey };
 }
 
 export function isSupabaseConfigured(): boolean {

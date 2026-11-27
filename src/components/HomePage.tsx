@@ -5,12 +5,16 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   ArrowRight,
+  Atom,
   FolderKanban,
   Loader2,
+  X,
 } from "lucide-react";
 import {
+  consumePendingHomePrompt,
   createProject,
   listProjects,
+  setPendingHomePrompt,
   setPendingPrompt,
 } from "@/lib/project-client";
 import {
@@ -20,6 +24,8 @@ import {
   saveTheme,
 } from "@/lib/storage";
 import { DEFAULT_MODEL_CONFIG, type ModelConfig } from "@/lib/types";
+import { useAuth } from "./AuthProvider";
+import { GoogleIcon } from "./GoogleIcon";
 import { SettingsModal } from "./SettingsModal";
 import { SiteHeader } from "./SiteHeader";
 
@@ -52,6 +58,7 @@ const STARTER_TEMPLATES = [
 
 export function HomePage() {
   const router = useRouter();
+  const { user, signInWithGoogle } = useAuth();
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [modelConfig, setModelConfig] =
     useState<ModelConfig>(DEFAULT_MODEL_CONFIG);
@@ -62,6 +69,8 @@ export function HomePage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [loginPromptOpen, setLoginPromptOpen] = useState(false);
+  const [signingIn, setSigningIn] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
   const showToast = useCallback((msg: string) => {
@@ -76,8 +85,33 @@ export function HomePage() {
     setTheme(savedTheme);
     document.documentElement.classList.toggle("dark", savedTheme === "dark");
     setModelConfig(loadModelConfig());
-    listProjects().then((res) => setProjectCount(res.projects.length));
   }, []);
+
+  useEffect(() => {
+    if (!user) {
+      setProjectCount(0);
+      return;
+    }
+
+    const restoredPrompt = consumePendingHomePrompt();
+    if (restoredPrompt) {
+      setPrompt(restoredPrompt);
+      showToast("登录成功，已为你恢复需求内容");
+      requestAnimationFrame(() => {
+        const el = textareaRef.current;
+        if (el) {
+          el.focus();
+          el.setSelectionRange(el.value.length, el.value.length);
+        }
+      });
+    }
+
+    listProjects().then((res) => {
+      if (!res.unauthorized && !res.error) {
+        setProjectCount(res.projects.length);
+      }
+    });
+  }, [user, showToast]);
 
   const isModelConfigured = Boolean(
     modelConfig.apiKey.trim() &&
@@ -98,12 +132,28 @@ export function HomePage() {
     showToast(`已保存模型配置：${next.model}`);
   };
 
+  const handleGoogleSignInFromModal = async () => {
+    if (signingIn) return;
+    setSigningIn(true);
+    const res = await signInWithGoogle("/");
+    if (res.error) {
+      setSigningIn(false);
+      showToast(res.error);
+    }
+  };
+
   const launchProjectWithPrompt = async (
     rawPrompt: string,
     customTitle?: string
   ) => {
     const cleaned = rawPrompt.trim();
     if (!cleaned || creating) return;
+
+    if (!user) {
+      setPendingHomePrompt(cleaned);
+      setLoginPromptOpen(true);
+      return;
+    }
 
     if (!isModelConfigured) {
       setPrompt(cleaned);
@@ -116,12 +166,21 @@ export function HomePage() {
     try {
       const name =
         customTitle || cleaned.replace(/\s+/g, " ").slice(0, 18) || "未命名应用";
-      const { project } = await createProject({
+      const res = await createProject({
         name,
         description: cleaned.slice(0, 140),
       });
-      setPendingPrompt(project.id, cleaned);
-      router.push(`/project/${encodeURIComponent(project.id)}`);
+      if (res.unauthorized) {
+        setPendingHomePrompt(cleaned);
+        router.push("/login?next=/");
+        return;
+      }
+      if (!res.project) {
+        showToast(res.error || "创建项目失败，请稍后重试");
+        return;
+      }
+      setPendingPrompt(res.project.id, cleaned);
+      router.push(`/project/${encodeURIComponent(res.project.id)}`);
     } finally {
       setCreating(false);
     }
@@ -177,9 +236,11 @@ export function HomePage() {
             />
             <div className="flex items-center justify-between gap-2 px-4 pb-3.5 pt-1">
               <span className="text-[11px] text-zinc-400">
-                {isModelConfigured
-                  ? "按 Enter 立即生成，Shift + Enter 换行"
-                  : "提示：请先点击右上角「模型设置」"}
+                {!user
+                  ? "使用 Google 账号登录后即可创建并保存你的专属项目"
+                  : isModelConfigured
+                    ? "按 Enter 立即生成，Shift + Enter 换行"
+                    : "提示：请先点击右上角「模型设置」"}
               </span>
               <button
                 type="submit"
@@ -223,7 +284,7 @@ export function HomePage() {
             ))}
           </div>
 
-          {projectCount > 0 && (
+          {user && projectCount > 0 && (
             <div className="mt-10">
               <Link
                 href="/projects"
@@ -244,6 +305,60 @@ export function HomePage() {
         onClose={() => setSettingsOpen(false)}
         onSave={handleSaveModelConfig}
       />
+
+      {/* Login Prompt Modal for Unauthenticated Build */}
+      {loginPromptOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4"
+          onClick={() => !signingIn && setLoginPromptOpen(false)}
+        >
+          <div
+            className="relative w-full max-w-sm rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-[#141418] p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              disabled={signingIn}
+              onClick={() => setLoginPromptOpen(false)}
+              className="absolute right-3.5 top-3.5 rounded-lg p-1 text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-700 dark:hover:text-zinc-200 transition-colors"
+              aria-label="关闭"
+            >
+              <X className="h-4 w-4" />
+            </button>
+
+            <div className="flex flex-col items-center text-center">
+              <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-500 to-indigo-600 text-white shadow-md shadow-violet-500/20">
+                <Atom className="h-5 w-5" />
+              </div>
+              <h2 className="mt-4 text-lg font-bold tracking-tight text-zinc-900 dark:text-zinc-50">
+                登录后开始构建应用
+              </h2>
+              <p className="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                你的应用描述已暂存。使用 Google 账号登录后，即可创建云端项目并在个人空间中持续迭代。
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleGoogleSignInFromModal}
+              disabled={signingIn}
+              className="mt-5 w-full inline-flex items-center justify-center gap-2.5 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-50 dark:hover:bg-zinc-800 hover:border-violet-500/50 disabled:opacity-60 px-4 py-2.5 text-sm font-medium text-zinc-900 dark:text-zinc-100 shadow-sm transition-all"
+            >
+              {signingIn ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin text-violet-500" />
+                  <span>正在跳转到 Google...</span>
+                </>
+              ) : (
+                <>
+                  <GoogleIcon className="h-4 w-4 shrink-0" />
+                  <span>使用 Google 账号继续</span>
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      )}
 
       {toast && (
         <div className="fixed bottom-4 right-4 z-50 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 px-4 py-2 text-xs font-medium shadow-xl">

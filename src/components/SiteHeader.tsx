@@ -10,6 +10,7 @@ import {
   Sun,
 } from "lucide-react";
 import type { ModelConfig } from "@/lib/types";
+import { UserMenu } from "./UserMenu";
 
 interface SiteHeaderProps {
   activeNav: "home" | "projects";
@@ -105,6 +106,8 @@ export function SiteHeader({
               {isModelConfigured ? modelConfig.model : "模型设置"}
             </span>
           </button>
+
+          <UserMenu />
         </div>
       </div>
     </header>

@@ -1,3 +1,4 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { AGENT_TOOLS, executeAgentTool } from "./agent-tools";
 import { compileProject, normalizeProjectFiles } from "./compiler";
 import {
@@ -6,7 +7,6 @@ import {
   type ProviderToolSpec,
 } from "./providers";
 import {
-  getSupabaseServerClient,
   PROJECTS_TABLE,
   rowToProject,
   type SupabaseProjectRow,
@@ -34,6 +34,8 @@ export type JobSubscriber = (event: AgentStreamEvent) => void;
 export interface ActiveAgentJob {
   jobId: string;
   projectId: string;
+  userId: string;
+  supabase: SupabaseClient;
   prompt: string;
   assistantMsgId: string;
   status: "running" | "done" | "error" | "aborted";
@@ -83,13 +85,11 @@ function buildWorkspaceContextMessage(files: ProjectFiles): string {
 }
 
 async function persistInitialJobState(job: ActiveAgentJob): Promise<void> {
-  const supabase = getSupabaseServerClient();
-  if (!supabase) return;
   const nowIso = new Date().toISOString();
   try {
-    await supabase.from(PROJECTS_TABLE).upsert(
-      {
-        id: job.projectState.id,
+    await job.supabase
+      .from(PROJECTS_TABLE)
+      .update({
         name: job.projectState.name || "未命名应用",
         description: job.projectState.description || "",
         files: job.projectState.files,
@@ -99,21 +99,21 @@ async function persistInitialJobState(job: ActiveAgentJob): Promise<void> {
         agent_job_id: job.jobId,
         agent_updated_at: nowIso,
         updated_at: nowIso,
-      },
-      { onConflict: "id" }
-    );
+      })
+      .eq("id", job.projectState.id)
+      .eq("user_id", job.userId);
   } catch {
     // Non-fatal fallback
   }
 }
 
 async function persistProgressToSupabase(
+  supabase: SupabaseClient,
+  userId: string,
   project: Project,
   jobId: string,
   finalStatus?: "done" | "error" | "aborted"
 ): Promise<void> {
-  const supabase = getSupabaseServerClient();
-  if (!supabase) return;
   const nowIso = new Date().toISOString();
   try {
     const payload: Record<string, unknown> = {
@@ -133,6 +133,7 @@ async function persistProgressToSupabase(
       .from(PROJECTS_TABLE)
       .update(payload)
       .eq("id", project.id)
+      .eq("user_id", userId)
       .eq("agent_job_id", jobId);
   } catch {
     // Non-fatal
@@ -145,8 +146,12 @@ function queuePersist(
 ): Promise<void> {
   const snapshotCopy = cloneProject(job.projectState);
   const jobId = job.jobId;
+  const supabase = job.supabase;
+  const userId = job.userId;
   job.persistChain = job.persistChain
-    .then(() => persistProgressToSupabase(snapshotCopy, jobId, finalStatus))
+    .then(() =>
+      persistProgressToSupabase(supabase, userId, snapshotCopy, jobId, finalStatus)
+    )
     .catch(() => {});
   return job.persistChain;
 }
@@ -188,15 +193,15 @@ function cloneProject(project: Project): Project {
 }
 
 export async function fetchRemoteProjectJobState(
+  supabase: SupabaseClient,
+  userId: string,
   projectId: string
 ): Promise<RemoteJobState | null> {
-  const supabase = getSupabaseServerClient();
-  if (!supabase) return null;
-
   const { data, error } = await supabase
     .from(PROJECTS_TABLE)
     .select("*")
     .eq("id", projectId)
+    .eq("user_id", userId)
     .maybeSingle();
 
   if (error || !data) return null;
@@ -221,16 +226,17 @@ export async function fetchRemoteProjectJobState(
 }
 
 async function isStopRequestedInSupabase(
+  supabase: SupabaseClient,
+  userId: string,
   projectId: string,
   jobId: string
 ): Promise<boolean> {
-  const supabase = getSupabaseServerClient();
-  if (!supabase) return false;
   try {
     const { data } = await supabase
       .from(PROJECTS_TABLE)
       .select("agent_status, agent_job_id")
       .eq("id", projectId)
+      .eq("user_id", userId)
       .maybeSingle();
     if (!data) return false;
     return (
@@ -254,43 +260,53 @@ function patchAssistantMessage(
   };
 }
 
-export function getAgentJob(projectId: string): ActiveAgentJob | undefined {
-  return getJobsMap().get(projectId);
+export function getAgentJob(
+  projectId: string,
+  userId: string
+): ActiveAgentJob | undefined {
+  const job = getJobsMap().get(projectId);
+  if (!job || job.userId !== userId) return undefined;
+  return job;
 }
 
-export async function requestStopAgentJob(projectId: string): Promise<boolean> {
+export async function requestStopAgentJob(
+  supabase: SupabaseClient,
+  userId: string,
+  projectId: string
+): Promise<boolean> {
   let stopped = false;
 
   const localJob = getJobsMap().get(projectId);
-  if (localJob && localJob.status === "running") {
+  if (localJob && localJob.userId === userId && localJob.status === "running") {
     localJob.abortController.abort();
     stopped = true;
   }
 
-  const supabase = getSupabaseServerClient();
-  if (supabase) {
-    try {
-      const { data } = await supabase
-        .from(PROJECTS_TABLE)
-        .update({
-          agent_status: "stop_requested",
-          agent_updated_at: new Date().toISOString(),
-        })
-        .eq("id", projectId)
-        .eq("agent_status", "running")
-        .select("id");
-      if (Array.isArray(data) && data.length > 0) {
-        stopped = true;
-      }
-    } catch {
-      // ignore
+  try {
+    const { data } = await supabase
+      .from(PROJECTS_TABLE)
+      .update({
+        agent_status: "stop_requested",
+        agent_updated_at: new Date().toISOString(),
+      })
+      .eq("id", projectId)
+      .eq("user_id", userId)
+      .eq("agent_status", "running")
+      .select("id");
+    if (Array.isArray(data) && data.length > 0) {
+      stopped = true;
     }
+  } catch {
+    // ignore
   }
 
   return stopped;
 }
 
 export async function prepareBackgroundAgentJob(params: {
+  supabase: SupabaseClient;
+  backgroundSupabase: SupabaseClient;
+  userId: string;
   project: Project;
   prompt: string;
   config: ModelConfig;
@@ -302,7 +318,11 @@ export async function prepareBackgroundAgentJob(params: {
 }> {
   const jobs = getJobsMap();
   const existingLocal = jobs.get(params.project.id);
-  if (existingLocal && existingLocal.status === "running") {
+  if (
+    existingLocal &&
+    existingLocal.userId === params.userId &&
+    existingLocal.status === "running"
+  ) {
     return {
       alreadyRunning: true,
       jobId: existingLocal.jobId,
@@ -310,7 +330,11 @@ export async function prepareBackgroundAgentJob(params: {
     };
   }
 
-  const remoteState = await fetchRemoteProjectJobState(params.project.id);
+  const remoteState = await fetchRemoteProjectJobState(
+    params.supabase,
+    params.userId,
+    params.project.id
+  );
   if (
     remoteState &&
     !remoteState.isStale &&
@@ -375,6 +399,8 @@ export async function prepareBackgroundAgentJob(params: {
   const job: ActiveAgentJob = {
     jobId: `job_${now}_${Math.random().toString(36).slice(2, 7)}`,
     projectId: baseProject.id,
+    userId: params.userId,
+    supabase: params.backgroundSupabase,
     prompt,
     assistantMsgId,
     status: "running",
@@ -435,7 +461,12 @@ async function runJobLoop(
 
   const stopPollTimer = setInterval(() => {
     if (signal.aborted || job.status !== "running") return;
-    void isStopRequestedInSupabase(job.projectId, job.jobId).then((stopReq) => {
+    void isStopRequestedInSupabase(
+      job.supabase,
+      job.userId,
+      job.projectId,
+      job.jobId
+    ).then((stopReq) => {
       if (stopReq && !signal.aborted) {
         job.abortController.abort();
       }
@@ -450,7 +481,14 @@ async function runJobLoop(
 
     for (let iteration = 1; iteration <= maxIterations; iteration++) {
       if (signal.aborted) break;
-      if (await isStopRequestedInSupabase(job.projectId, job.jobId)) {
+      if (
+        await isStopRequestedInSupabase(
+          job.supabase,
+          job.userId,
+          job.projectId,
+          job.jobId
+        )
+      ) {
         job.abortController.abort();
         break;
       }

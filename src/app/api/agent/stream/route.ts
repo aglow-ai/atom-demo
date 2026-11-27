@@ -4,6 +4,7 @@ import {
   getAgentJob,
   type JobSubscriber,
 } from "@/lib/agent-runner";
+import { getAuthenticatedServerContext } from "@/lib/supabase/server";
 import type { AgentStreamEvent } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -22,6 +23,14 @@ function mapRemoteStatus(
 }
 
 export async function GET(req: NextRequest) {
+  const auth = await getAuthenticatedServerContext();
+  if (!auth) {
+    return new Response(JSON.stringify({ error: "请先使用 Google 账号登录" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
   const projectId = req.nextUrl.searchParams.get("projectId")?.trim() || "";
   if (!projectId) {
     return new Response(JSON.stringify({ error: "Missing projectId" }), {
@@ -31,7 +40,9 @@ export async function GET(req: NextRequest) {
   }
 
   const encoder = new TextEncoder();
-  const localJob = getAgentJob(projectId);
+  const userId = auth.user.id;
+  const localJob = getAgentJob(projectId, userId);
+  const pollSupabase = await auth.createBackgroundClient();
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -109,7 +120,11 @@ export async function GET(req: NextRequest) {
       }
 
       // 2. Cross-instance Vercel Serverless path (reads live state from Supabase)
-      const initialRemote = await fetchRemoteProjectJobState(projectId);
+      const initialRemote = await fetchRemoteProjectJobState(
+        pollSupabase,
+        userId,
+        projectId
+      );
       if (closed) return;
 
       if (!initialRemote || initialRemote.agentStatus === "idle") {
@@ -147,7 +162,11 @@ export async function GET(req: NextRequest) {
 
         polling = true;
         try {
-          const nextRemote = await fetchRemoteProjectJobState(projectId);
+          const nextRemote = await fetchRemoteProjectJobState(
+            pollSupabase,
+            userId,
+            projectId
+          );
           if (closed) return;
 
           if (!nextRemote) {

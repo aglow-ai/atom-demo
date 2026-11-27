@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { ArrowLeft, Code2, Eye, History, Loader2 } from "lucide-react";
 import { exportProjectZip, exportStandaloneHtml } from "@/lib/export";
 import {
@@ -12,10 +13,8 @@ import {
 } from "@/lib/project-client";
 import {
   loadModelConfig,
-  loadProjects as loadLocalProjects,
   loadTheme,
   saveModelConfig,
-  saveProjects as saveLocalProjects,
   saveTheme,
 } from "@/lib/storage";
 import {
@@ -36,16 +35,8 @@ interface AtomsWorkbenchProps {
   projectId: string;
 }
 
-function mirrorProjectLocally(project: Project) {
-  const all = loadLocalProjects();
-  const exists = all.some((p) => p.id === project.id);
-  const next = exists
-    ? all.map((p) => (p.id === project.id ? project : p))
-    : [project, ...all];
-  saveLocalProjects(next);
-}
-
 export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
+  const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [theme, setTheme] = useState<"dark" | "light">("dark");
@@ -131,6 +122,14 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
           }
         );
 
+        if (res.status === 401) {
+          setIsRunning(false);
+          router.replace(
+            `/login?next=${encodeURIComponent(`/project/${targetProjectId}`)}`
+          );
+          return;
+        }
+
         if (!res.ok || !res.body) {
           setIsRunning(false);
           return;
@@ -151,7 +150,6 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
 
             case "job_snapshot": {
               setProjectAndRef(event.project);
-              mirrorProjectLocally(event.project);
               const stillActive = event.status === "running";
               lastKnownRunning = stillActive;
               setIsRunning(stillActive);
@@ -269,13 +267,11 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
             case "files_sync": {
               setProjectAndRef((p) => {
                 if (!p) return p;
-                const next = {
+                return {
                   ...p,
                   files: { ...event.files },
                   updatedAt: Date.now(),
                 };
-                mirrorProjectLocally(next);
-                return next;
               });
               if (event.changedFiles.length > 0) {
                 setActiveFile(
@@ -289,7 +285,6 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
               lastKnownRunning = false;
               if (event.project) {
                 setProjectAndRef(event.project);
-                mirrorProjectLocally(event.project);
               }
               setIsRunning(false);
               if (
@@ -311,9 +306,6 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
                   s.status === "running" ? { ...s, status: "error" } : s
                 ),
               }));
-              if (projectRef.current) {
-                mirrorProjectLocally(projectRef.current);
-              }
               setIsRunning(false);
               break;
             }
@@ -362,7 +354,7 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
         }
       }
     },
-    [setProjectAndRef]
+    [router, setProjectAndRef]
   );
 
   // Load project + auto-reattach to any running background job on mount/refresh
@@ -379,6 +371,12 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
       try {
         const loaded = await getProjectById(projectId);
         if (!active) return;
+        if (loaded.unauthorized) {
+          router.replace(
+            `/login?next=${encodeURIComponent(`/project/${projectId}`)}`
+          );
+          return;
+        }
         if (!loaded.project) {
           setNotFound(true);
           setProjectAndRef(null);
@@ -398,7 +396,7 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
       // Detach SSE listener on unmount — background job continues running on server!
       streamAbortRef.current?.abort();
     };
-  }, [projectId, setProjectAndRef, attachToJobStream]);
+  }, [projectId, router, setProjectAndRef, attachToJobStream]);
 
   // Split pane dragging handlers
   useEffect(() => {
@@ -442,8 +440,12 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
     const updated: Project = { ...cur, name, updatedAt: Date.now() };
     setProjectAndRef(updated);
     const res = await renameProjectById(cur.id, name);
+    if (res.unauthorized) {
+      router.replace(`/login?next=${encodeURIComponent(`/project/${cur.id}`)}`);
+      return;
+    }
     if (!res.ok) {
-      showToast("重命名失败，请稍后重试");
+      showToast(res.error || "重命名失败，请稍后重试");
     }
   };
 
@@ -497,12 +499,15 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
     setViewingSnapshotId(null);
     setActiveFile(null);
     setProjectAndRef(updated);
-    mirrorProjectLocally(updated);
     showToast(`已回滚至 v${versionNum} · ${snap.label}`);
 
     const res = await saveProject(updated);
+    if (res.unauthorized) {
+      router.replace(`/login?next=${encodeURIComponent(`/project/${cur.id}`)}`);
+      return;
+    }
     if (!res.ok) {
-      showToast("保存回滚结果失败，请稍后重试");
+      showToast(res.error || "保存回滚结果失败，请稍后重试");
     }
   };
 
@@ -577,6 +582,14 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
           }),
         });
 
+        if (res.status === 401) {
+          setIsRunning(false);
+          router.replace(
+            `/login?next=${encodeURIComponent(`/project/${baseProjectSnapshot.id}`)}`
+          );
+          return;
+        }
+
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.ok) {
           const errMsg = data.error || `启动失败 (HTTP ${res.status})`;
@@ -599,7 +612,6 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
 
         if (data.project) {
           setProjectAndRef(data.project as Project);
-          mirrorProjectLocally(data.project as Project);
         }
 
         void attachToJobStream(baseProjectSnapshot.id);
@@ -621,7 +633,7 @@ export function AtomsWorkbench({ projectId }: AtomsWorkbenchProps) {
         showToast(errMsg);
       }
     },
-    [attachToJobStream, isRunning, modelConfig, setProjectAndRef, showToast]
+    [attachToJobStream, isRunning, modelConfig, router, setProjectAndRef, showToast]
   );
 
   // Auto-run pending prompt passed from the Home Page

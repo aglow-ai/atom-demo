@@ -1,5 +1,7 @@
 import { after, NextRequest, NextResponse } from "next/server";
 import { prepareBackgroundAgentJob } from "@/lib/agent-runner";
+import { getAuthenticatedServerContext } from "@/lib/supabase/server";
+import { PROJECTS_TABLE } from "@/lib/supabase-server";
 import type { ModelConfig, Project } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -12,6 +14,14 @@ interface StartAgentRequest {
 }
 
 export async function POST(req: NextRequest) {
+  const auth = await getAuthenticatedServerContext();
+  if (!auth) {
+    return NextResponse.json(
+      { error: "请先使用 Google 账号登录" },
+      { status: 401 }
+    );
+  }
+
   let body: StartAgentRequest;
   try {
     body = (await req.json()) as StartAgentRequest;
@@ -42,7 +52,33 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const { data: ownedProject, error: ownershipError } = await auth.supabase
+    .from(PROJECTS_TABLE)
+    .select("id")
+    .eq("id", project.id)
+    .eq("user_id", auth.user.id)
+    .maybeSingle();
+
+  if (ownershipError) {
+    return NextResponse.json(
+      { error: `校验项目权限失败: ${ownershipError.message}` },
+      { status: 500 }
+    );
+  }
+
+  if (!ownedProject) {
+    return NextResponse.json(
+      { error: "项目不存在或无权访问" },
+      { status: 404 }
+    );
+  }
+
+  const backgroundSupabase = await auth.createBackgroundClient();
+
   const prepared = await prepareBackgroundAgentJob({
+    supabase: auth.supabase,
+    backgroundSupabase,
+    userId: auth.user.id,
     project,
     prompt,
     config,

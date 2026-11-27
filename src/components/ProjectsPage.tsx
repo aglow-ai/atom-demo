@@ -72,11 +72,18 @@ export function ProjectsPage() {
     setLoading(true);
     try {
       const listRes = await listProjects();
+      if (listRes.unauthorized) {
+        router.replace("/login?next=%2Fprojects");
+        return;
+      }
+      if (listRes.error) {
+        showToast(listRes.error);
+      }
       setProjects(listRes.projects);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [router, showToast]);
 
   useEffect(() => {
     const savedTheme = loadTheme();
@@ -103,11 +110,19 @@ export function ProjectsPage() {
     if (creating) return;
     setCreating(true);
     try {
-      const { project } = await createProject({
+      const res = await createProject({
         name: `新应用 #${projects.length + 1}`,
         description: "",
       });
-      router.push(`/project/${encodeURIComponent(project.id)}`);
+      if (res.unauthorized) {
+        router.replace("/login?next=%2Fprojects");
+        return;
+      }
+      if (!res.project) {
+        showToast(res.error || "新建项目失败，请稍后重试");
+        return;
+      }
+      router.push(`/project/${encodeURIComponent(res.project.id)}`);
     } finally {
       setCreating(false);
     }
@@ -118,7 +133,15 @@ export function ProjectsPage() {
     if (deletingId) return;
     setDeletingId(id);
     try {
-      await deleteProjectById(id);
+      const res = await deleteProjectById(id);
+      if (res.unauthorized) {
+        router.replace("/login?next=%2Fprojects");
+        return;
+      }
+      if (!res.ok) {
+        showToast(res.error || "删除项目失败，请稍后重试");
+        return;
+      }
       setProjects((prev) => prev.filter((p) => p.id !== id));
       showToast("已删除项目");
     } finally {

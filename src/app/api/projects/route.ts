@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getAuthenticatedServerContext } from "@/lib/supabase/server";
 import {
-  getSupabaseServerClient,
   PROJECTS_TABLE,
   rowToProject,
   rowToProjectSummary,
@@ -12,17 +12,21 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const supabase = getSupabaseServerClient();
-  if (!supabase) {
-    return NextResponse.json({
-      storage: "unconfigured",
-      projects: [],
-    });
+  const auth = await getAuthenticatedServerContext();
+  if (!auth) {
+    return NextResponse.json(
+      { error: "请先使用 Google 账号登录" },
+      { status: 401 }
+    );
   }
 
+  const { supabase, user } = auth;
   const { data, error } = await supabase
     .from(PROJECTS_TABLE)
-    .select("id, name, description, files, messages, snapshots, created_at, updated_at")
+    .select(
+      "id, user_id, name, description, files, messages, snapshots, created_at, updated_at"
+    )
+    .eq("user_id", user.id)
     .order("updated_at", { ascending: false });
 
   if (error) {
@@ -44,13 +48,15 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
-  const supabase = getSupabaseServerClient();
-  if (!supabase) {
+  const auth = await getAuthenticatedServerContext();
+  if (!auth) {
     return NextResponse.json(
-      { storage: "unconfigured", error: "Supabase 尚未配置" },
-      { status: 503 }
+      { error: "请先使用 Google 账号登录" },
+      { status: 401 }
     );
   }
+
+  const { supabase, user } = auth;
 
   try {
     const body = (await req.json().catch(() => ({}))) as {
@@ -69,6 +75,7 @@ export async function POST(req: NextRequest) {
 
     const payload = {
       id,
+      user_id: user.id,
       name: body.name?.trim() || "未命名应用",
       description: body.description?.trim() || "",
       files: body.files || {},
